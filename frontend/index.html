@@ -55,7 +55,7 @@
       <div class="crumb">Workspace <span class="crumb-sep">/</span> <span id="crumbView">Studio</span></div>
       <div class="topbar-right">
         <span class="chip chip-muted" title="Clip selection model">◈ Nemotron <span class="chip-free">FREE</span></span>
-        <span class="chip chip-muted">◉ Local engine</span>
+        <span class="chip chip-muted" id="asrChip" title="Speech-to-text engine">◉ detecting…</span>
       </div>
     </header>
 
@@ -186,6 +186,8 @@
 
         <div class="run-row">
           <button class="btn btn-primary btn-lg" id="createBtn">Generate clips <span class="arrow">→</span></button>
+          <button class="btn btn-ghost btn-sm" id="importBtn" title="Use a transcript JSON from a Kaggle/Colab GPU run">↥ Import transcript</button>
+          <input type="file" id="importFile" accept=".json,application/json" hidden />
           <span class="run-note" id="runNote">Link mode · no upload needed</span>
         </div>
 

@@ -33,9 +33,30 @@ First run downloads a ~75 MB Whisper model.
 - Three views: **Studio** (run jobs), **Agent** (chat), **Clips** (session results).
 - Restrained accents, hairline borders, gliding hover states — no generic purple-gradient AI look.
 
+## Making "7 hours in 30 minutes" real
+
+The bottleneck is **transcription**, not clipping. Three paths, fastest first:
+
+### 1. Groq ASR (recommended — minutes, not hours)
+Groq's `whisper-large-v3-turbo` on LPU is extremely fast. ClipForge splits the audio into 10-minute chunks and transcribes **8 chunks in parallel**. A 7h VOD = ~42 chunks → a couple of minutes.
+
+- Get a **free** key at https://console.groq.com (no credit card; 14,400 requests/day).
+- Add to `.env`: `GROQ_API_KEY=gsk_...`
+- Restart. The topbar chip changes to `⚡ Groq turbo`.
+- Tune with `ASR_CHUNK_SECONDS` (default 600) and `ASR_MAX_WORKERS` (default 8).
+
+### 2. Free GPU notebook (no API key)
+Run `notebooks/free_gpu_asr.ipynb` on **Kaggle** (30 GPU h/week, T4), **Colab** (T4), **Lightning AI** (80 GPU h/month), or **SageMaker Studio Lab**. It downloads audio, transcribes with `large-v3` on the T4 GPU, and exports `transcript.json`. Then in ClipForge click **↥ Import transcript** and paste the same URL — clip selection and rendering happen locally with zero local transcription.
+
+### 3. Source captions (instant)
+YouTube/Twitch sources with caption tracks are used directly — no ASR at all.
+
+### 4. Local Whisper (free, slow)
+Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
+
 ## Honest limitations
 
-- **Processing speed**: the 7h-in-30min claim of OpusClip/Klap comes from cloud GPU farms and cloud ASR. Locally, a 7-hour VOD with no caption track will take hours to transcribe on a CPU (a 34s clip takes ~15–60s). Sources with existing captions are near-instant.
+- **Processing speed without Groq/GPU**: OpusClip/Klap's 7h-in-30min comes from cloud GPU farms. On CPU-only local Whisper, a 7-hour VOD with no captions takes hours. Sources with existing captions are near-instant.
 - **YouTube bot checks**: unauthenticated YouTube may be blocked. Set `YT_COOKIES_FROM_BROWSER=chrome` in `.env` to use your browser cookies (or use Twitch/Kick/direct links).
 - **Live streams**: resolves live URLs, but "realtime clipping while broadcasting" in the cloud sense isn't replicated — it processes VODs and recorded streams.
 - The `ANYMODEL_API_KEY` is stored but unused (base URL unresolved). NVIDIA free models power all AI.
@@ -46,7 +67,12 @@ First run downloads a ~75 MB Whisper model.
 |---|---|
 | `NVIDIA_API_KEY` | Free NVIDIA NIM models for clip selection + agent (verified working) |
 | `YT_COOKIES_FROM_BROWSER` | Optional browser name for YouTube cookie auth |
-| `WHISPER_MODEL` | `tiny` (default, fast) or `base` (slower, more accurate) |
+| `ASR_BACKEND` | `auto` (default), `groq`, or `local` |
+| `GROQ_API_KEY` | Free key from console.groq.com — enables fast parallel ASR |
+| `GROQ_ASR_MODEL` | `whisper-large-v3-turbo` (default) |
+| `ASR_CHUNK_SECONDS` | `600` (10 min chunks for parallel transcription) |
+| `ASR_MAX_WORKERS` | `8` parallel chunk requests |
+| `WHISPER_MODEL` | `tiny` (local default, fast) or `base` (slower, more accurate) |
 | `WHISPER_BEAM` | `1` (default) |
 
 ## Structure

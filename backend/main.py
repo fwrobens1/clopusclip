@@ -1,6 +1,7 @@
 """ClipForge API - a working AI clipping website with URL ingestion + agent chat."""
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import threading
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 import agent  # noqa: E402
+import asr  # noqa: E402
 from ai import select_clips  # noqa: E402
 from clips import probe_duration, render_clip  # noqa: E402
 from sources import download_audio, download_section, download_transcript, resolve as resolve_url  # noqa: E402
@@ -30,8 +32,9 @@ AUDIO_DIR = ROOT / "work" / "audio"
 CLIP_DIR = ROOT / "work" / "clips"
 SECTION_DIR = ROOT / "work" / "sections"
 SUBS_DIR = ROOT / "work" / "subs"
+ASR_DIR = ROOT / "work" / "asr"
 FRONTEND_DIR = ROOT / "frontend"
-for d in (UPLOAD_DIR, AUDIO_DIR, CLIP_DIR, SECTION_DIR, SUBS_DIR):
+for d in (UPLOAD_DIR, AUDIO_DIR, CLIP_DIR, SECTION_DIR, SUBS_DIR, ASR_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ClipForge API")
@@ -106,8 +109,12 @@ def _pipeline(job_id: str):
         _extract_audio(video_path, audio_path)
 
         _set(job_id, stage="transcribe", progress=20, message="Transcribing speech...")
-        transcript = transcribe_audio(str(audio_path))
-        _set(job_id, language=transcript.get("language"))
+
+        def _prog(msg):
+            _set(job_id, message=msg)
+
+        transcript = asr.transcribe(audio_path, ASR_DIR / job_id, progress_cb=_prog)
+        _set(job_id, language=transcript.get("language"), asr_backend=transcript.get("backend"))
 
         _set(job_id, stage="analyze", progress=50, message="AI is finding your best moments...")
         _finalize_selection(job_id, transcript["segments"], float(job.get("duration") or 0))
@@ -142,13 +149,16 @@ def _url_pipeline(job_id: str):
                  message=f"Using {len(segments)} caption cues from the source (no transcription needed).")
         else:
             # 2) Audio-only download + local transcription
-            source_kind = "whisper"
+            source_kind = "asr"
             _set(job_id, progress=15, message="Downloading audio only (not the whole video)...")
             audio = download_audio(url, AUDIO_DIR / f"{job_id}_src.wav")
-            _set(job_id, progress=22, message="Transcribing speech locally...")
-            tr = transcribe_audio(str(audio))
+
+            def _prog(msg):
+                _set(job_id, message=msg)
+
+            tr = asr.transcribe(audio, ASR_DIR / job_id, progress_cb=_prog)
             segments = tr["segments"]
-            _set(job_id, language=tr.get("language"))
+            _set(job_id, language=tr.get("language"), asr_backend=tr.get("backend"))
 
         _set(job_id, stage="analyze", progress=45, message="AI is finding your best moments...")
         _finalize_selection(job_id, segments, info["duration"])
@@ -263,6 +273,90 @@ async def clip_url(
     return {"job_id": job_id}
 
 
+def _pipeline_from_transcript(job_id: str):
+    """Skip ASR entirely — use an imported transcript (e.g. from a free-GPU notebook)."""
+    try:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        if job.get("source_url") and not job.get("source_info"):
+            _set(job_id, progress=5, message="Resolving source info...")
+            _set(job_id, source_info=resolve_url(job["source_url"]))
+        duration = float(job.get("duration") or 0)
+        _set(job_id, stage="analyze", progress=50, message="AI is finding your best moments...")
+        _finalize_selection(job_id, job.get("transcript") or [], duration)
+        _set(job_id, transcript_source="imported")
+        _render_all(job_id)
+        _set(job_id, status="done", stage="done", progress=100, message="Your clips are ready!")
+    except Exception as e:  # noqa: BLE001
+        _set(job_id, status="error", progress=100, message=str(e), error=str(e))
+
+
+@app.post("/api/import-transcript")
+async def import_transcript(
+    transcript: UploadFile = File(...),
+    url: str = Form(""),
+    num_clips: int = Form(5),
+    clip_length: str = Form("medium"),
+    captions: bool = Form(True),
+    vertical: bool = Form(True),
+    goal: str = Form(""),
+):
+    """Import a transcript JSON produced by the free-GPU notebook (or any ASR)."""
+    try:
+        raw = await transcript.read()
+        data = json.loads(raw)
+        segments = data.get("segments", data if isinstance(data, list) else [])
+        if not segments:
+            raise HTTPException(400, "Transcript has no segments")
+        cleaned = []
+        for s in segments:
+            try:
+                cleaned.append({
+                    "start": float(s.get("start", 0)),
+                    "end": float(s.get("end", 0)),
+                    "text": str(s.get("text", "")).strip(),
+                    "words": [{"word": str(w.get("word", "")),
+                               "start": float(w.get("start", 0)),
+                               "end": float(w.get("end", 0))}
+                              for w in (s.get("words") or [])],
+                })
+            except (TypeError, ValueError):
+                continue
+        if not cleaned:
+            raise HTTPException(400, "No valid segments in transcript")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Invalid transcript JSON: {e}")
+
+    source_url = url.strip() or None
+    duration = 0.0
+    if source_url:
+        try:
+            info = resolve_url(source_url)
+            duration = info["duration"]
+        except Exception:
+            source_url = None
+    if not duration:
+        duration = max(float(s["end"]) for s in cleaned)
+
+    job_id = _new_job(
+        source_url=source_url,
+        num_clips=max(1, min(num_clips, 12)),
+        clip_length=clip_length,
+        settings={"captions": captions, "vertical": vertical},
+        goal=goal,
+        transcript=cleaned,
+        duration=round(duration, 2),
+        language=data.get("language", "imported"),
+        asr_backend=data.get("backend", "imported"),
+        message="Using imported transcript...",
+    )
+    threading.Thread(target=_pipeline_from_transcript, args=(job_id,), daemon=True).start()
+    return {"job_id": job_id, "segments": len(cleaned)}
+
+
 @app.post("/api/upload")
 async def upload(
     file: UploadFile = File(...),
@@ -367,6 +461,19 @@ def status(job_id: str):
         "settings": job.get("settings", {}), "goal": job.get("goal", ""),
         "source_info": job.get("source_info"),
         "transcript_source": job.get("transcript_source"),
+        "asr_backend": job.get("asr_backend"),
+    }
+
+
+@app.get("/api/asr/status")
+def asr_status():
+    """Report which ASR backend is active (for the UI status chip)."""
+    return {
+        "active": asr.active_backend(),
+        "groq_configured": bool(asr.GROQ_KEY),
+        "groq_model": asr.GROQ_MODEL,
+        "chunk_seconds": asr.CHUNK_SECONDS,
+        "max_workers": asr.MAX_WORKERS,
     }
 
 

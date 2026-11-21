@@ -427,6 +427,44 @@ function addJobMessageToChat(d) {
     `<span class="tool-chip done">✓ completed</span><span class="tool-chip">${d.clips.length} clips</span>`);
 }
 
+/* ---------------- ASR status + transcript import ---------------- */
+async function checkAsr() {
+  try {
+    const r = await fetch('/api/asr/status');
+    const d = await r.json();
+    const chip = $('asrChip');
+    if (d.active === 'groq') {
+      chip.textContent = '⚡ Groq turbo';
+      chip.style.color = 'var(--success)';
+      chip.title = `Groq ${d.groq_model} · ${d.max_workers} parallel ${d.chunk_seconds}s chunks`;
+    } else {
+      chip.textContent = '◉ Local Whisper';
+      chip.title = 'Set GROQ_API_KEY in .env for 7h-in-minutes ASR';
+    }
+  } catch (e) { /* ignore */ }
+}
+$('importBtn').addEventListener('click', () => $('importFile').click());
+$('importFile').addEventListener('change', async () => {
+  const f = $('importFile').files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append('transcript', f);
+  const url = $('urlInput').value.trim();
+  if (looksLikeUrl(url)) fd.append('url', url);
+  const o = options();
+  Object.entries(o).forEach(([k, v]) => fd.append(k, v));
+  fd.append('goal', goalText());
+  try {
+    const res = await fetch('/api/import-transcript', { method: 'POST', body: fd });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || 'Import failed');
+    toast(`Imported ${d.segments} transcript cues`);
+    beginJob(d.job_id, f.name);
+  } catch (e) { toast(e.message); }
+  $('importFile').value = '';
+});
+
 // init
 setMode('link');
 renderRecent();
+checkAsr();
