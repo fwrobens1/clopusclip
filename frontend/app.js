@@ -66,6 +66,7 @@ $('newJobBtn').addEventListener('click', resetAll);
 function resetAll() {
   stopPolling();
   state.file = null; state.source = null; state.jobId = null;
+  try { localStorage.removeItem('cf_job'); } catch (e) { /* private mode */ }
   $('sourceCard').classList.add('hidden');
   $('results').classList.add('hidden');
   $('progressCard').classList.add('hidden');
@@ -222,6 +223,7 @@ async function startUpload() {
 
 function beginJob(jobId, label) {
   state.jobId = jobId;
+  try { localStorage.setItem('cf_job', jobId); } catch (e) { /* private mode */ }
   state.startedAt = Date.now();
   state.jobs.unshift({ id: jobId, label, status: 'queued', clips: 0 });
   renderRecent();
@@ -474,3 +476,15 @@ $('importFile').addEventListener('change', async () => {
 setMode('link');
 renderRecent();
 checkAsr();
+// Restore the last job (or a ?job= link) so results survive page reloads and
+// server restarts — the backend keeps results in memory keyed by job id.
+(function restoreJob() {
+  const shared = new URLSearchParams(location.search).get('job');
+  let id = shared || null;
+  if (!id) { try { id = localStorage.getItem('cf_job'); } catch (e) { /* ignore */ } }
+  if (!id) return;
+  state.jobId = id;
+  state.jobs.unshift({ id, label: shared ? 'Shared job' : 'Previous job', status: 'queued', clips: 0 });
+  renderRecent();
+  startPolling();
+})();
