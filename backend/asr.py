@@ -31,7 +31,10 @@ GROQ_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_MODEL = os.getenv("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
 CHUNK_SECONDS = int(os.getenv("ASR_CHUNK_SECONDS", "600"))  # 10 min
-MAX_WORKERS = int(os.getenv("ASR_MAX_WORKERS", "8"))
+# Groq's free tier throttles bursts hard: 8 workers failed ~40% of chunks,
+# 4 workers failed ~60%. Gentle sequential uploads succeed ~100%. With retries
+# this still finishes a 7h VOD in minutes, and avoids the slow local fallback.
+MAX_WORKERS = int(os.getenv("ASR_MAX_WORKERS", "1"))
 ASR_BACKEND = os.getenv("ASR_BACKEND", "auto").lower()
 
 
@@ -53,37 +56,48 @@ def _duration(path: str | Path) -> float:
 
 
 def _split_audio(audio_path: str | Path, work_dir: Path) -> list[tuple[Path, float]]:
-    """Split audio into compressed MP3 chunks. Returns [(path, start_offset_seconds)]."""
+    """Split audio into raw WAV chunks (no re-encode — ~100x faster than MP3).
+
+    CHUNK_SECONDS of 16 kHz mono PCM is ~19 MB, safely under Groq's 25 MB
+    limit. Re-encoding a 7h WAV to MP3 used to take ~20 minutes; copying raw
+    PCM takes seconds. Returns [(path, start_offset_seconds)].
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
-    pattern = work_dir / "chunk_%04d.mp3"
+    pattern = work_dir / "chunk_%04d.wav"
     r = subprocess.run(
         [FFMPEG, "-y", "-i", str(audio_path), "-f", "segment",
-         "-segment_time", str(CHUNK_SECONDS), "-c:a", "libmp3lame",
-         "-b:a", "64k", "-ac", "1", "-ar", "16000", str(pattern)],
+         "-segment_time", str(CHUNK_SECONDS), "-c:a", "copy", str(pattern)],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
         raise RuntimeError(f"Audio chunking failed: {r.stderr[-300:]}")
-    chunks = sorted(work_dir.glob("chunk_*.mp3"))
+    chunks = sorted(work_dir.glob("chunk_*.wav"))
     return [(p, i * CHUNK_SECONDS) for i, p in enumerate(chunks)]
 
 
-def _transcribe_groq_chunk(client: httpx.Client, path: Path, offset: float) -> dict:
-    with open(path, "rb") as f:
-        r = client.post(
-            GROQ_URL,
-            headers={"Authorization": f"Bearer {GROQ_KEY}"},
-            files={"file": (path.name, f, "audio/mpeg")},
-            data={
-                "model": GROQ_MODEL,
-                "response_format": "verbose_json",
-                "timestamp_granularities[]": ["segment", "word"],
-            },
-            timeout=180.0,
-        )
-    if r.status_code != 200:
+def _transcribe_groq_chunk(client: httpx.Client, path: Path, offset: float,
+                           retries: int = 4) -> dict:
+    """Transcribe one chunk, retrying throttles/5xx with exponential backoff."""
+    for attempt in range(retries):
+        with open(path, "rb") as f:
+            r = client.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                files={"file": (path.name, f, "audio/wav")},
+                data={
+                    "model": GROQ_MODEL,
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": ["segment", "word"],
+                },
+                timeout=180.0,
+            )
+        if r.status_code == 200:
+            return {"data": r.json(), "offset": offset}
+        if r.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+            time.sleep((attempt + 1) * 6)  # 6s, 12s, 18s
+            continue
         raise RuntimeError(f"Groq {r.status_code}: {r.text[:200]}")
-    return {"data": r.json(), "offset": offset}
+    raise RuntimeError("Groq: exhausted retries")
 
 
 def _normalize(data: dict, offset: float) -> dict:
@@ -149,7 +163,20 @@ def transcribe_groq(audio_path: str | Path, work_dir: Path,
 
     failed = [i for i, r in enumerate(results) if r is None]
     if failed:
-        # Local fallback for failed chunks so we still return a complete transcript
+        # Retry throttled chunks one at a time — concurrency was the problem.
+        if progress_cb:
+            progress_cb(f"Retrying {len(failed)} throttled chunks one at a time...")
+        with httpx.Client() as client:
+            for i in failed:
+                p, off = chunks[i]
+                try:
+                    results[i] = _transcribe_groq_chunk(client, p, off)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"retry chunk {i}: {e}")
+
+    failed = [i for i, r in enumerate(results) if r is None]
+    if failed:
+        # Local fallback for the few chunks Groq still couldn't do
         if progress_cb:
             progress_cb(f"Groq missed {len(failed)} chunks — filling locally")
         from transcribe import transcribe_audio as local_transcribe

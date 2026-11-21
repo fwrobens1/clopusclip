@@ -198,59 +198,42 @@ def download_audio(url: str, out_path: Path, max_minutes: float | None = None,
     return result
 
 
+def _resolve_media_url(url: str) -> tuple[str, list[str]]:
+    """Resolve the direct HLS/file URL (no download) plus ffmpeg header args."""
+    with yt_dlp.YoutubeDL({**_base_opts(), "skip_download": True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    media_url = info.get("url")
+    if not media_url:
+        raise RuntimeError("Could not resolve a direct media URL for this source")
+    headers = info.get("http_headers") or {}
+    header_args: list[str] = []
+    if headers:
+        # ffmpeg expects one -headers string with CRLF-separated lines.
+        header_args = ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+    return media_url, header_args
+
+
 def download_section(url: str, start: float, end: float, out_path: Path) -> Path:
-    """Download only a short section of the source as an MP4 (no full VOD download)."""
+    """Fetch only a short section by seeking directly in the source stream.
+
+    yt-dlp's ``download_sections`` re-downloaded the ENTIRE 7h Twitch VOD
+    (10+ GB, thousands of fragments) instead of just the requested window.
+    Resolving the direct HLS URL and letting ffmpeg seek to the timestamp
+    fetches only the needed fragments — a 30s section takes a few seconds.
+    Re-encoding (rather than -c copy) keeps cuts accurate for word captions.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     span = max(2, int(end - start) + 2)
-    opts = {
-        **_base_opts(),
-        "format": "best[height<=720]/best",
-        "merge_output_format": "mp4",
-        "download_sections": [f"*{int(start)}-{int(start) + span}"],
-        "force_keyframes_at_cuts": True,
-        "outtmpl": str(out_path.with_suffix("")),
-        "overwrites": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-    except Exception:
-        pass
-    for p in [out_path, *[out_path.with_suffix("." + e) for e in ("mp4", "mkv", "webm", "mov")]]:
-        if p.exists() and p.stat().st_size > 1000:
-            return p
+    media_url, header_args = _resolve_media_url(url)
 
-    # Fallback for direct/generic media URLs (no HLS section support):
-    # download the full file once into a cache, then cut locally with ffmpeg.
-    cache = out_path.parent / (out_path.stem.split("_sec_")[0] + "_full")
-    cached_file = None
-    for p in [cache, *[cache.with_suffix("." + e) for e in ("mp4", "mkv", "webm", "mov")]]:
-        if p.exists() and p.stat().st_size > 1000:
-            cached_file = p
-            break
-    if cached_file is None:
-        full_opts = {
-            **_base_opts(),
-            "format": "best[height<=720]/best",
-            "merge_output_format": "mp4",
-            "outtmpl": str(cache),
-            "overwrites": True,
-        }
-        with yt_dlp.YoutubeDL(full_opts) as ydl:
-            ydl.download([url])
-        for p in [cache, *[cache.with_suffix("." + e) for e in ("mp4", "mkv", "webm", "mov")]]:
-            if p.exists() and p.stat().st_size > 1000:
-                cached_file = p
-                break
-    if cached_file is None:
-        raise RuntimeError("Section download produced no file")
-
-    r = subprocess.run(
-        [FFMPEG, "-y", "-ss", f"{max(0, start):.3f}", "-i", str(cached_file),
-         "-t", f"{span}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest", str(out_path)],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0 or not out_path.exists():
-        raise RuntimeError(f"Section cut failed: {r.stderr[-300:]}")
+    cmd = [
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *header_args,
+        "-ss", f"{max(0, start):.3f}", "-i", media_url, "-t", f"{span}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-shortest", str(out_path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 1000:
+        raise RuntimeError(f"Section fetch failed: {r.stderr[-400:]}")
     return out_path
