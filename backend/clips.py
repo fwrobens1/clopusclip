@@ -117,7 +117,9 @@ def render_clip(
     duration = max(0.5, end - start)
 
     w, h = probe_size(input_path)
-    out_w, out_h = (1080, 1920) if vertical else (w, h)
+    # 720x1280 is still standard 9:16 for social feeds, but ~2.25x cheaper to
+    # encode than 1080x1920. On CPU this kept renders near 1x realtime.
+    out_w, out_h = (720, 1280) if vertical else (w, h)
 
     ass_path = out_path + ".ass"
     made_ass = bool(captions and words and build_ass(words, start, end, out_w, out_h, ass_path))
@@ -131,11 +133,13 @@ def render_clip(
         af = ass_filter if use_captions else ""
         if vertical:
             # Complex filtergraph needed (blurred background + overlay = 2 inputs)
+            # Blur a tiny copy and scale it back up — visually identical to
+            # blurring at full size but ~10x faster on CPU. Cap at 30fps.
             fc = (
-                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-                "crop=1080:1920,boxblur=18:4[bg];"
-                "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+                "[0:v]scale=180:320:force_original_aspect_ratio=increase,"
+                "crop=180:320,boxblur=5:2,scale=720:1280[bg];"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=decrease[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,fps=30[v]"
             )
             if af:
                 fc += f";[v]{af}[vout]"

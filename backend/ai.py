@@ -175,7 +175,7 @@ def select_clips(
 Transcript:
 {transcript_text}
 {goal_line}
-Choose {num_clips} viral clip moments. Each clip should be roughly {target}.
+Choose {num_clips} viral clip moments. EACH CLIP MUST BE {target} — this is a hard requirement, not a suggestion. Clips outside that range will be cut to fit.
 Return ONLY this JSON shape:
 {{"clips":[{{"start":12.5,"end":45.2,"title":"A catchy title","reason":"why this will go viral","score":9}}]}}
 start and end must be numbers in seconds within the video duration. start < end.
@@ -201,6 +201,15 @@ ALWAYS return the JSON object, even if the ideal length is not possible. No extr
             continue
         start = max(0.0, min(start, max(0.0, video_duration - 2)))
         end = min(video_duration, max(start + 2, end))
+        # Enforce the requested length band even if the model ignores the prompt.
+        lo, hi = {"short": (15, 30), "medium": (30, 60), "long": (60, 90)}.get(
+            clip_length, (30, 60)
+        )
+        if video_duration >= num_clips * lo:
+            if end - start > hi:
+                end = start + hi
+            elif end - start < lo and start + lo <= video_duration:
+                end = start + lo
         out.append(
             {
                 "start": round(start, 2),
