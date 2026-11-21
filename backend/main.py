@@ -151,7 +151,13 @@ def _url_pipeline(job_id: str):
             # 2) Audio-only download + local transcription
             source_kind = "asr"
             _set(job_id, progress=15, message="Downloading audio only (not the whole video)...")
-            audio = download_audio(url, AUDIO_DIR / f"{job_id}_src.wav")
+
+            def _dl_progress(info):
+                if info.get("downloaded", 0) > 0:
+                    _set(job_id, progress=15 + min(30, int(float(info["percent"].strip('%') or 0) * 0.3)),
+                         message=f"Downloading audio · {info['percent']} · {info['speed']} · ETA {info['eta']}")
+
+            audio = download_audio(url, AUDIO_DIR / f"{job_id}_src.wav", progress_cb=_dl_progress)
 
             def _prog(msg):
                 _set(job_id, message=msg)

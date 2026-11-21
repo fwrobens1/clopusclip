@@ -14,7 +14,7 @@ import re
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yt_dlp
 
@@ -28,6 +28,13 @@ def _base_opts() -> dict:
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 30,
+        # HLS/DASH streams are split into many small fragments. Downloading
+        # them in parallel turns a ~45min audio grab into a few minutes.
+        "concurrent_fragment_downloads": int(os.getenv("YT_FRAGMENT_WORKERS", "8")),
+        # Keep HLS fragments instead of bulk-deleting them: some sandboxes
+        # block batch deletions, which stalls yt-dlp mid-download.
+        "keep_fragments": True,
+        "noprogress": True,
     }
     if COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = (COOKIES_FROM_BROWSER,)
@@ -124,7 +131,8 @@ def download_transcript(url: str, work_dir: Path, langs: tuple[str, ...] = ("en"
     return _parse_vtt(text)
 
 
-def download_audio(url: str, out_path: Path, max_minutes: float | None = None) -> Path:
+def download_audio(url: str, out_path: Path, max_minutes: float | None = None,
+                   progress_cb: Callable[[dict], None] | None = None) -> Path:
     """Download audio only (small) for local transcription."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     opts = {
@@ -137,6 +145,16 @@ def download_audio(url: str, out_path: Path, max_minutes: float | None = None) -
         "postprocessor_args": ["-ar", "16000", "-ac", "1"],
         "overwrites": True,
     }
+    if progress_cb:
+        def hook(d):
+            if d.get("status") == "downloading":
+                progress_cb({
+                    "percent": d.get("_percent_str", "").strip() or "0%",
+                    "speed": d.get("_speed_str", "").strip(),
+                    "eta": d.get("_eta_str", "").strip(),
+                    "downloaded": d.get("downloaded_bytes") or 0,
+                })
+        opts["progress_hooks"] = [hook]
     if max_minutes:
         opts["download_ranges"] = lambda info, ydl: [{"start_time": 0, "end_time": max_minutes * 60}]
     try:
