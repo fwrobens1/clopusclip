@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 GROQ_KEY = os.getenv("GROQ_API_KEY", "").strip()
