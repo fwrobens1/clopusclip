@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ClipForge — AI clipping workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">◈</div>
+      <div class="brand-name">ClipForge</div>
+      <div class="brand-tag">local</div>
+    </div>
+
+    <div class="side-group">
+      <div class="side-label">WORKSPACE</div>
+      <button class="nav-item active" data-view="studio">
+        <svg viewBox="0 0 24 24"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <span>Studio</span>
+      </button>
+      <button class="nav-item" data-view="agent">
+        <svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-4-.9L3 20l1.1-4.4A8.4 8.4 0 0 1 3.5 11.5 8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5Z"/></svg>
+        <span>Agent</span>
+        <span class="nav-badge" id="agentBadge">NEW</span>
+      </button>
+      <button class="nav-item" data-view="clips">
+        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 15 5-5 4 4 3-3 6 6"/></svg>
+        <span>Clips</span>
+        <span class="nav-count" id="navClipCount">0</span>
+      </button>
+    </div>
+
+    <div class="side-group side-grow">
+      <div class="side-label">RECENT</div>
+      <div id="recentJobs" class="recent-list"><div class="empty-hint">No jobs yet</div></div>
+    </div>
+
+    <div class="side-footer">
+      <div class="status-line"><span class="status-dot"></span><span>All processing local</span></div>
+      <div class="status-sub" id="engineStatus">Whisper tiny · Nemotron free</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <div class="crumb">Workspace <span class="crumb-sep">/</span> <span id="crumbView">Studio</span></div>
+      <div class="topbar-right">
+        <span class="chip chip-muted" title="Clip selection model">◈ Nemotron <span class="chip-free">FREE</span></span>
+        <span class="chip chip-muted">◉ Local engine</span>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- STUDIO VIEW -->
+      <section id="view-studio" class="view active">
+        <div class="page-head">
+          <div>
+            <h1>Studio</h1>
+            <p class="page-sub">Paste a link or upload a file. Get viral-ready clips with captions and reframing.</p>
+          </div>
+          <div class="page-actions">
+            <button class="btn btn-ghost" id="resetBtn">Reset</button>
+          </div>
+        </div>
+
+        <!-- Command bar -->
+        <div class="command-wrap">
+          <div class="command-bar" id="commandBar">
+            <span class="cmd-icon">⌘</span>
+            <input id="commandInput" autocomplete="off" spellcheck="false"
+                   placeholder="Paste a YouTube / Twitch / Kick link, or ask: clip the funniest moments…" />
+            <div class="cmd-right">
+              <span class="cmd-hint" id="cmdHint">Enter to analyze</span>
+              <button class="btn btn-primary btn-sm" id="commandSend">Analyze <span class="kbd">↵</span></button>
+            </div>
+          </div>
+          <div class="cmd-suggestions">
+            <span class="suggest-label">TRY</span>
+            <button class="suggest" data-fill="https://www.twitch.tv/videos/2934887631">twitch.tv/videos/2934887631</button>
+            <button class="suggest" data-fill="clip the funniest moments from this 7 hour stream">“clip the funniest moments”</button>
+            <button class="suggest" data-fill="make 8 short clips with no captions">“8 short clips, no captions”</button>
+          </div>
+        </div>
+
+        <!-- Source preview -->
+        <div class="source-card hidden" id="sourceCard">
+          <img class="source-thumb" id="sourceThumb" alt="" />
+          <div class="source-body">
+            <div class="source-top">
+              <span class="chip chip-platform" id="sourcePlatform">TWITCH</span>
+              <span class="chip chip-muted" id="sourceLive">VOD</span>
+            </div>
+            <div class="source-title" id="sourceTitle">—</div>
+            <div class="source-meta" id="sourceMeta">—</div>
+          </div>
+          <div class="source-actions">
+            <button class="btn btn-ghost btn-sm" id="changeSourceBtn">Change</button>
+          </div>
+        </div>
+
+        <!-- Input mode tabs -->
+        <div class="mode-row">
+          <button class="mode-tab active" data-mode="link">Link</button>
+          <button class="mode-tab" data-mode="upload">Upload file</button>
+          <button class="mode-tab" data-mode="agent">Ask agent</button>
+        </div>
+
+        <!-- Link panel -->
+        <div class="panel mode-panel" id="panel-link">
+          <div class="field-row">
+            <label class="field-label" for="urlInput">Source URL</label>
+            <div class="input-with-btn">
+              <input id="urlInput" placeholder="https://youtube.com/watch?v=… or twitch.tv/videos/…" spellcheck="false" />
+              <button class="btn btn-secondary btn-sm" id="previewBtn">Preview</button>
+            </div>
+          </div>
+          <div class="field-row goal-row">
+            <label class="field-label" for="goalInput">Creative brief <span class="label-optional">optional</span></label>
+            <input id="goalInput" placeholder="e.g. the funniest reactions, 5 short clips" />
+          </div>
+        </div>
+
+        <!-- Upload panel -->
+        <div class="panel mode-panel hidden" id="panel-upload">
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="video/*" hidden />
+            <div class="dz-symbol">⇧</div>
+            <div class="dz-title">Drop a video here or <span>browse</span></div>
+            <div class="dz-sub">MP4 · MOV · WEBM · MKV — up to 2 GB</div>
+          </label>
+          <div class="file-pill hidden" id="filePill"></div>
+          <div class="field-row goal-row">
+            <label class="field-label" for="goalInput2">Creative brief <span class="label-optional">optional</span></label>
+            <input id="goalInput2" placeholder="e.g. the most emotional moments" />
+          </div>
+        </div>
+
+        <!-- Agent panel -->
+        <div class="panel mode-panel hidden" id="panel-agent">
+          <div class="agent-mini">
+            <div class="agent-avatar">◈</div>
+            <div>
+              <div class="agent-name">ClipForge Agent</div>
+              <div class="agent-desc">Tell me what you want in plain language. I'll pick the moments, set the options, and run the job.</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="openAgentBtn">Open chat →</button>
+          </div>
+          <div class="field-row goal-row">
+            <label class="field-label" for="agentInput">Your request</label>
+            <textarea id="agentInput" rows="2" placeholder="Paste a link and say what to clip…"></textarea>
+          </div>
+        </div>
+
+        <!-- Options -->
+        <div class="options-card">
+          <div class="options-head">OUTPUT SETTINGS <span class="options-note">Applied to every clip</span></div>
+          <div class="options-grid">
+            <div class="opt">
+              <label for="numClips">Clips</label>
+              <select id="numClips"><option>3</option><option selected>5</option><option>8</option><option>10</option></select>
+            </div>
+            <div class="opt">
+              <label for="clipLength">Length</label>
+              <select id="clipLength"><option value="short">Short · 15–30s</option><option value="medium" selected>Medium · 30–60s</option><option value="long">Long · 60–90s</option></select>
+            </div>
+            <div class="opt">
+              <label>Captions</label>
+              <label class="switch-row"><span class="switch-desc">Word highlight</span><input type="checkbox" id="captions" checked /><span class="switch"></span></label>
+            </div>
+            <div class="opt">
+              <label>Format</label>
+              <label class="switch-row"><span class="switch-desc">Vertical 9:16</span><input type="checkbox" id="vertical" checked /><span class="switch"></span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="run-row">
+          <button class="btn btn-primary btn-lg" id="createBtn">Generate clips <span class="arrow">→</span></button>
+          <span class="run-note" id="runNote">Link mode · no upload needed</span>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-card hidden" id="progressCard">
+          <div class="progress-top">
+            <div class="loader"><span></span><span></span><span></span><span></span></div>
+            <div class="progress-copy">
+              <div class="progress-title" id="progressTitle">Working…</div>
+              <div class="progress-sub" id="progressSub">Elapsed <span id="elapsed">0:00</span> · <span id="progressDetail">Preparing</span></div>
+            </div>
+            <div class="progress-pct" id="progressPct">0%</div>
+          </div>
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+          <div class="task-rows" id="taskRows">
+            <div class="task-row" data-stage="resolve"><span class="task-dot"></span><span>Resolve source</span><span class="task-state">pending</span></div>
+            <div class="task-row" data-stage="transcribe"><span class="task-dot"></span><span>Transcript / captions</span><span class="task-state">pending</span></div>
+            <div class="task-row" data-stage="analyze"><span class="task-dot"></span><span>AI moment selection</span><span class="task-state">pending</span></div>
+            <div class="task-row" data-stage="render"><span class="task-dot"></span><span>Render clips</span><span class="task-state">pending</span></div>
+          </div>
+        </div>
+
+        <!-- Results -->
+        <div id="results" class="hidden">
+          <div class="results-head">
+            <div>
+              <h2>Your clips</h2>
+              <p class="page-sub" id="resultsMeta">—</p>
+            </div>
+            <div class="results-actions">
+              <button class="btn btn-ghost btn-sm" id="reRenderToggle">Adjust output</button>
+              <button class="btn btn-secondary btn-sm" id="newJobBtn">New job</button>
+            </div>
+          </div>
+          <div class="rerender-bar hidden" id="rerenderBar">
+            <label class="switch-row"><span>Captions</span><input type="checkbox" id="reCaptions" checked /><span class="switch"></span></label>
+            <label class="switch-row"><span>Vertical 9:16</span><input type="checkbox" id="reVertical" checked /><span class="switch"></span></label>
+            <button class="btn btn-secondary btn-sm" id="reRenderBtn">Re-render</button>
+          </div>
+          <div class="clips-grid" id="clipsGrid"></div>
+          <div class="error-box hidden" id="errorBox"></div>
+        </div>
+
+      </section>
+
+      <!-- AGENT VIEW -->
+      <section id="view-agent" class="view hidden">
+        <div class="page-head">
+          <div>
+            <h1>Agent</h1>
+            <p class="page-sub">A conversational clipboard. Paste a link, describe the outcome, and iterate.</p>
+          </div>
+        </div>
+        <div class="chat-shell">
+          <div class="chat-header">
+            <span class="agent-avatar sm">◈</span>
+            <div><div class="agent-name">ClipForge Agent</div><div class="agent-online"><span class="status-dot"></span> ready</div></div>
+            <span class="chip chip-muted chat-model">Nemotron · free</span>
+          </div>
+          <div class="chat-messages" id="chatMessages">
+            <div class="msg agent">
+              <div class="msg-avatar">◈</div>
+              <div class="msg-body">
+                <div class="bubble">Hey. Give me a link — YouTube, Twitch, Kick — and tell me what to find. Try “clip the funniest moments” or “the 3 most chaotic reactions”.</div>
+                <div class="msg-time">just now</div>
+              </div>
+            </div>
+          </div>
+          <div class="chat-composer">
+            <div class="composer-box">
+              <textarea id="chatInput" rows="2" placeholder="Paste a link and tell me what to clip…  (Shift+Enter for new line)"></textarea>
+              <div class="composer-actions">
+                <span class="composer-hint">↵ send · ⇧↵ newline</span>
+                <button class="btn btn-primary btn-sm" id="chatSend">Send <span class="arrow">→</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CLIPS VIEW -->
+      <section id="view-clips" class="view hidden">
+        <div class="page-head">
+          <div><h1>Clips</h1><p class="page-sub">All rendered clips from your current session.</p></div>
+        </div>
+        <div class="clips-grid" id="allClipsGrid"></div>
+        <div class="empty-state" id="clipsEmpty">No clips yet. Run a job in Studio or ask the Agent.</div>
+      </section>
+
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
