@@ -154,10 +154,21 @@ def _url_pipeline(job_id: str):
 
             def _dl_progress(info):
                 if info.get("downloaded", 0) > 0:
-                    _set(job_id, progress=15 + min(30, int(float(info["percent"].strip('%') or 0) * 0.3)),
+                    # Live streams report "~ 12.3%" — strip both ~ and %.
+                    pct = info.get("percent", "0").replace("~", "").strip().strip("%")
+                    try:
+                        p = float(pct)
+                    except ValueError:
+                        p = 0.0
+                    _set(job_id, progress=15 + min(30, int(p * 0.3)),
                          message=f"Downloading audio · {info['percent']} · {info['speed']} · ETA {info['eta']}")
 
-            audio = download_audio(url, AUDIO_DIR / f"{job_id}_src.wav", progress_cb=_dl_progress)
+            audio = download_audio(
+                url, AUDIO_DIR / f"{job_id}_src.wav",
+                progress_cb=_dl_progress,
+                # A live stream is only a partial snapshot — never cache it.
+                use_cache=not info.get("is_live", False),
+            )
 
             def _prog(msg):
                 _set(job_id, message=msg)

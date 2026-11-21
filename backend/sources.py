@@ -9,6 +9,7 @@ Strategy for long VODs (e.g. 7-hour Twitch streams):
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -34,6 +35,9 @@ def _base_opts() -> dict:
         # Keep HLS fragments instead of bulk-deleting them: some sandboxes
         # block batch deletions, which stalls yt-dlp mid-download.
         "keep_fragments": True,
+        # Don't delete the downloaded file after postprocessing either — the
+        # same sandbox guard blocks that single delete and hangs yt-dlp.
+        "keepvideo": True,
         "noprogress": True,
     }
     if COOKIES_FROM_BROWSER:
@@ -132,9 +136,21 @@ def download_transcript(url: str, work_dir: Path, langs: tuple[str, ...] = ("en"
 
 
 def download_audio(url: str, out_path: Path, max_minutes: float | None = None,
-                   progress_cb: Callable[[dict], None] | None = None) -> Path:
-    """Download audio only (small) for local transcription."""
+                   progress_cb: Callable[[dict], None] | None = None,
+                   use_cache: bool = True) -> Path:
+    """Download audio only (small) for local transcription.
+
+    Completed downloads are cached by URL so repeat jobs are instant. Live
+    streams must pass use_cache=False — their downloads are partial snapshots,
+    which would poison the cache for later runs.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    cache = out_path.parent / ("urlcache_" + hashlib.md5(url.encode()).hexdigest()[:16] + ".wav")
+    if use_cache and cache.exists() and cache.stat().st_size > 100_000:
+        if progress_cb:
+            progress_cb({"percent": "100%", "speed": "cached", "eta": "00:00",
+                         "downloaded": cache.stat().st_size})
+        return cache
     opts = {
         **_base_opts(),
         "format": "bestaudio/best",
@@ -165,10 +181,21 @@ def download_audio(url: str, out_path: Path, max_minutes: float | None = None,
 
     # ExtractAudio may produce .wav at the template path
     candidates = [out_path, out_path.with_suffix(".wav")]
+    result: Path | None = None
     for c in candidates:
         if c.exists() and c.stat().st_size > 1000:
-            return c
-    raise RuntimeError("Audio download produced no file")
+            result = c
+            break
+    if result is None:
+        raise RuntimeError("Audio download produced no file")
+
+    # Cache only complete, full-length downloads (never partial/live ranges).
+    if use_cache and max_minutes is None and result.stat().st_size > 100_000:
+        try:
+            shutil.copy2(result, cache)
+        except OSError:
+            pass  # caching is best-effort; never fail a job over it
+    return result
 
 
 def download_section(url: str, start: float, end: float, out_path: Path) -> Path:

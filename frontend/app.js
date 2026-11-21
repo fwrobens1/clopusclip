@@ -36,7 +36,13 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 });
 function switchView(name) {
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
-  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
+  // Views are hidden with the .hidden class (see index.html) — toggling only
+  // .active left the old view visible. Hide everything, then show the target.
+  document.querySelectorAll('.view').forEach((v) => {
+    const show = v.id === `view-${name}`;
+    v.classList.toggle('hidden', !show);
+    v.classList.toggle('active', show);
+  });
   $('crumbView').textContent = VIEW_NAMES[name] || name;
   if (name === 'clips') renderAllClips();
 }
