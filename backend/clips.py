@@ -7,10 +7,11 @@ import subprocess
 from typing import Any
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+RENDER_TIMEOUT = float(os.getenv("RENDER_TIMEOUT", "480"))
 
 
 def _ffmpeg(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run([FFMPEG, *args], capture_output=True, text=True)
+    return subprocess.run([FFMPEG, *args], capture_output=True, text=True, timeout=RENDER_TIMEOUT)
 
 
 def probe_duration(path: str) -> float:
@@ -137,8 +138,9 @@ def render_clip(
     end = float(clip["end"])
     duration = max(0.5, end - start)
 
+    import hardware
+
     if encoder is None or encoder_args is None:
-        import hardware
         encoder, encoder_args = hardware.encoder_args(prefer_hardware)
 
     w, h = probe_size(input_path)
@@ -158,7 +160,7 @@ def render_clip(
         ass_arg = ass_path.replace("\\", "/").replace(":", "\\:")
         ass_filter = f"ass='{ass_arg}'"
 
-    def build_cmd(use_captions: bool) -> list[str]:
+    def build_cmd(use_captions: bool, enc: str, eargs: list[str]) -> list[str]:
         cmd = ["-y", "-ss", f"{start:.3f}", "-i", input_path, "-t", f"{duration:.3f}"]
         af = ass_filter if use_captions else ""
         # Fast path: no reframe, no captions, no draft — remux the section.
@@ -181,7 +183,7 @@ def render_clip(
             fc = (
                 f"[0:v]crop={crop_w}:{crop_h}:{x0}:{y0},"
                 f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-                f"crop={out_w}:{out_h},fps={fps}[v]"
+                f"crop={out_w}:{out_h},setsar=1,fps={fps}[v]"
             )
             if af:
                 fc += f";[v]{af}[vout]"
@@ -192,13 +194,13 @@ def render_clip(
         elif af:
             cmd += ["-vf", af]
         cmd += [
-            "-c:v", encoder, *encoder_args,
+            "-c:v", enc, *eargs,
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart", "-shortest", out_path,
         ]
         return cmd
 
-    r = _ffmpeg(build_cmd(True))
+    r = _ffmpeg(build_cmd(True, encoder, encoder_args))
     if made_ass and os.path.exists(ass_path):
         try:
             os.remove(ass_path)
@@ -206,11 +208,17 @@ def render_clip(
             pass
 
     if r.returncode != 0 or not os.path.exists(out_path):
-        # Retry without captions (e.g. libass unavailable or bad subtitle timing)
-        r2 = _ffmpeg(build_cmd(False))
-        if r2.returncode == 0 and os.path.exists(out_path):
-            return {"ok": True, "path": out_path, "captions": False,
-                    "note": "Captions could not be burned in; clip rendered without them."}
-        return {"ok": False, "error": (r2.stderr or r.stderr or "ffmpeg failed")[-800:]}
+        if hardware.is_encoder_error(r.stderr or ""):
+            # GPU driver may vanish mid-session; retry on CPU before giving up.
+            encoder, encoder_args = hardware.fallback_encoder_args(encoder)
+            r = _ffmpeg(build_cmd(True, encoder, encoder_args))
+        if r.returncode != 0 or not os.path.exists(out_path):
+            # Retry without captions (e.g. libass unavailable or bad subtitle timing)
+            r2 = _ffmpeg(build_cmd(False, encoder, encoder_args))
+            if r2.returncode == 0 and os.path.exists(out_path):
+                return {"ok": True, "path": out_path, "captions": False,
+                        "note": "Captions could not be burned in; clip rendered without them."}
+            return {"ok": False, "error": (r2.stderr or r.stderr or "ffmpeg failed")[-800:]}
 
-    return {"ok": True, "path": out_path, "captions": made_ass, "size": os.path.getsize(out_path)}
+    return {"ok": True, "path": out_path, "captions": made_ass,
+            "size": os.path.getsize(out_path), "encoder": encoder}

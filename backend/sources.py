@@ -244,7 +244,11 @@ def download_section(url: str, start: float, end: float, out_path: Path) -> Path
         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
         "-shortest", str(out_path),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=float(os.getenv("SECTION_TIMEOUT", "240")))
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"Section fetch timed out after {e.timeout}s") from e
     if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 1000:
         raise RuntimeError(f"Section fetch failed: {r.stderr[-400:]}")
     return out_path

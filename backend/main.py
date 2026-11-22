@@ -360,6 +360,20 @@ def _local_words(job: dict, start: float, end: float) -> list[dict]:
     return out
 
 
+def _mark_render_failure(clip: dict, error: str) -> None:
+    """Keep a previously successful video playable if a re-render fails."""
+    previous = clip.get("last_url") or clip.get("url")
+    clip["render_error"] = str(error)[:1200]
+    if previous and not str(previous).endswith("?draft=1"):
+        clip["render_status"] = "done"
+        clip["url"] = previous
+        clip["error"] = "Re-render failed — showing the previous version."
+    else:
+        clip["render_status"] = "error"
+        clip["url"] = None
+        clip["error"] = str(error)
+
+
 def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
     if _cancelled(job_id):
         return {"ok": False, "error": "cancelled", "index": i}
@@ -412,20 +426,52 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
         if result.get("ok"):
             clip["render_status"] = "draft" if draft else "done"
             clip["url"] = f"/api/clips/{job_id}/{i}" if not draft else f"/api/clips/{job_id}/{i}?draft=1"
+            clip["last_url"] = clip["url"]
             clip["captions"] = result.get("captions", False)
             clip["error"] = None
+            clip["render_error"] = None
+            clip["encoder"] = result.get("encoder")
         else:
-            clip["render_status"] = "error"
-            clip["error"] = result.get("error", "render failed")
-            clip["url"] = None
+            _mark_render_failure(clip, result.get("error", "render failed"))
     except Exception as e:  # noqa: BLE001
-        clip["render_status"] = "error"
-        clip["error"] = str(e)
-        clip["url"] = None
+        _mark_render_failure(clip, str(e))
     return {"ok": clip.get("render_status") in ("done", "draft"), "index": i}
 
 
-def _render_all(job_id: str, indices: list[int] | None = None, draft: bool = False) -> None:
+_RENDER_LOCKS: dict[str, threading.Lock] = {}
+_RENDER_LOCKS_GUARD = threading.Lock()
+
+
+def _render_lock(job_id: str) -> threading.Lock:
+    with _RENDER_LOCKS_GUARD:
+        return _RENDER_LOCKS.setdefault(job_id, threading.Lock())
+
+
+def _start_render(job_id: str, indices: list[int] | None, draft: bool = False) -> bool:
+    """Start a render thread, rejecting overlapping renders on the same job."""
+    lock = _render_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return False
+    t = threading.Thread(target=_render_all, args=(job_id, indices, draft, lock), daemon=True)
+    t.start()
+    return True
+
+
+def _render_all(job_id: str, indices: list[int] | None = None, draft: bool = False,
+                lock: threading.Lock | None = None) -> None:
+    own_lock = False
+    if lock is None:
+        lock = _render_lock(job_id)
+        own_lock = lock.acquire(blocking=False)
+        if not own_lock:
+            return
+    try:
+        _render_all_locked(job_id, indices, draft)
+    finally:
+        lock.release()
+
+
+def _render_all_locked(job_id: str, indices: list[int] | None = None, draft: bool = False) -> None:
     job = jobs.get(job_id)
     if not job:
         return
@@ -441,8 +487,7 @@ def _render_all(job_id: str, indices: list[int] | None = None, draft: bool = Fal
             try:
                 fut.result()
             except Exception as e:  # noqa: BLE001
-                clips[i]["render_status"] = "error"
-                clips[i]["error"] = str(e)
+                _mark_render_failure(clips[i], str(e))
             done += 1
             _set(job_id, progress=55 + int(40 * done / total),
                  message=f"Rendered {done}/{total} · {hardware.ffmpeg_label()}",
@@ -723,13 +768,17 @@ async def render_selected(job_id: str, body: RenderSelectedBody):
         if 0 <= idx < len(job["clips"]):
             c = job["clips"][idx]
             c["render_status"] = "pending"
-            c["url"] = None
+            # Keep the last good video watchable until the new render succeeds.
+            if c.get("url"):
+                c["last_url"] = c["url"]
+            c["error"] = None
             c["selected"] = True
             if body.hooks and str(idx) in body.hooks:
                 c["hook_index"] = int(body.hooks[str(idx)])
     job["draft"] = body.draft
     _set(job_id, clips=list(job["clips"]), status="processing", stage="render")
-    threading.Thread(target=_render_all, args=(job_id, body.indices, body.draft), daemon=True).start()
+    if not _start_render(job_id, body.indices, body.draft):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     return {"ok": True, "rendering": len(body.indices)}
 
 
@@ -790,10 +839,35 @@ async def continue_clipping(job_id: str, body: ContinueBody):
          status="processing", stage="analyze", progress=50,
          message=f"Found {len(fresh)} more moments...")
     if body.auto_render:
-        threading.Thread(target=_render_all, args=(job_id, list(range(old_count, len(updated))), False), daemon=True).start()
+        if not _start_render(job_id, list(range(old_count, len(updated))), False):
+            raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     else:
         _set(job_id, status="needs_review", stage="review", message="More moments ready to review.")
     return {"job_id": job_id, "added": len(fresh), "total": len(updated)}
+
+
+@app.post("/api/retry-failed/{job_id}")
+async def retry_failed(job_id: str):
+    """Render every failed or not-yet-rendered clip in one pass."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    indices = [
+        i for i, c in enumerate(job.get("clips") or [])
+        if c.get("render_status") in ("error", "pending")
+    ]
+    if not indices:
+        return {"ok": True, "retrying": 0}
+    for i in indices:
+        job["clips"][i]["render_status"] = "pending"
+        job["clips"][i]["error"] = None
+        job["clips"][i]["render_error"] = None
+    sources._MEDIA_URL_CACHE.pop(job.get("source_url"), None)
+    _set(job_id, clips=list(job["clips"]), status="processing", stage="render",
+         message=f"Rendering {len(indices)} remaining clips...")
+    if not _start_render(job_id, indices, False):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
+    return {"ok": True, "retrying": len(indices)}
 
 
 @app.post("/api/cancel/{job_id}")
@@ -813,7 +887,8 @@ async def retry_clip(job_id: str, index: int):
     job["clips"][index]["render_status"] = "pending"
     job["clips"][index]["error"] = None
     _set(job_id, clips=list(job["clips"]), status="processing", stage="render")
-    threading.Thread(target=_render_all, args=(job_id, [index], False), daemon=True).start()
+    if not _start_render(job_id, [index], False):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     return {"ok": True}
 
 
@@ -897,7 +972,8 @@ async def regenerate_clip(job_id: str, index: int, body: RegenerateBody):
     job["clips"][index] = replacement
     _set(job_id, clips=list(job["clips"]), status="processing", stage="render",
          progress=55, message=f"Regenerating moment {index + 1}...")
-    threading.Thread(target=_render_all, args=(job_id, [index], False), daemon=True).start()
+    if not _start_render(job_id, [index], False):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     return {"ok": True, "index": index, "clip": replacement}
 
 
@@ -935,8 +1011,10 @@ async def chat(message: str = Form(...), job_id: str | None = Form(None)):
         }
         for c in job["clips"]:
             c["render_status"] = "pending"
-            c["url"] = None
-        threading.Thread(target=_render_all, args=(job["id"], None, False), daemon=True).start()
+            if c.get("url"):
+                c["last_url"] = c["url"]
+        if not _start_render(job["id"], None, False):
+            raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
         reply = agent.reply(message, "Re-rendering the existing clips.\n" + context)
     else:
         reply = agent.reply(message, context)
@@ -986,9 +1064,11 @@ def re_render(job_id: str, captions: bool = True, vertical: bool = True, draft: 
     job["draft"] = draft
     for c in job["clips"]:
         c["render_status"] = "pending"
-        c["url"] = None
+        if c.get("url"):
+            c["last_url"] = c["url"]
     _set(job_id, clips=list(job["clips"]), status="processing", stage="render")
-    threading.Thread(target=_render_all, args=(job_id, None, draft), daemon=True).start()
+    if not _start_render(job_id, None, draft):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     return {"ok": True}
 
 
@@ -1020,7 +1100,8 @@ async def render_selection(body: SelectionBody):
         language=transcript.get("language"), asr_backend=transcript.get("backend"),
         transcript_source="precomputed", clips=selection, message="Rendering selected moments...",
     )
-    threading.Thread(target=_render_all, args=(job_id, None, False), daemon=True).start()
+    if not _start_render(job_id, None, False):
+        raise HTTPException(409, "A render is already running for this job. Wait or cancel it.")
     return {"job_id": job_id, "clips": len(selection)}
 
 

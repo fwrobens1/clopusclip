@@ -549,7 +549,9 @@
   function renderData(d) {
     const platform = (d.source_info?.platform || (d.source_url ? "link" : "local")).toUpperCase();
     state.clips = (d.clips || []).map((c, i) => {
-      const st = c.render_status === "done" ? "ready" : c.render_status === "error" ? "failed" : "rendering";
+      const st = (c.render_status === "done" || c.render_status === "draft")
+        ? "ready" : c.render_status === "error" ? "failed"
+        : c.render_status === "pending" ? "pending" : "rendering";
       const words = (c.reason || c.title || "").split(/\s+/).filter(Boolean).slice(0, 12);
       return {
         _idx: i,
@@ -562,8 +564,9 @@
         hot: 1,
         status: st,
         progress: 0,
-        url: c.url || `/api/clips/${d.id}/${i}`,
+        url: c.url || "",
         error: c.error || "",
+        renderError: c.render_error || "",
         captions: !!c.captions,
         vertical: d.settings?.vertical !== false,
         reason: c.reason || "",
@@ -630,7 +633,8 @@
     return c.cap.split(" ").map((w, i) => i === c.hot ? `<b>${esc(w)}</b>` : esc(w)).join(" ");
   }
   function clipCard(c) {
-    const ready = c.status === "ready";
+    const watchable = !!c.url;
+    const ready = c.status === "ready" || watchable;
     const cls = c.status === "failed" ? "failed" : c.status === "rendering" ? "rendering" : "";
     const note = c.note
       ? `<span class="note-chip ${c.note === "keep" ? "keep" : c.note === "flop" ? "flop" : ""}">${esc(c.note)}</span>`
@@ -646,6 +650,7 @@
         ${ready ? `<button class="play" data-edit="${c._idx}" aria-label="Open editor"><svg class="ico" aria-hidden="true"><use href="#i-play"/></svg></button>` : ""}
         ${ready && opt.captions && c.cap ? `<div class="cap">${captionHTML(c)}</div>` : ""}
         ${c.status === "rendering" ? `<div class="render-ov"><span class="rp"><span class="spin"></span>Rendering</span><div class="mini-track"><span style="width:24%"></span></div></div>` : ""}
+        ${c.status === "pending" ? `<div class="pending-ov">Not rendered</div>` : ""}
         ${c.status === "failed" ? `<div class="fail-ov"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg>Render failed</div>` : ""}
       </div>
       <div class="clip-body">
@@ -658,8 +663,9 @@
           </div>
         </div>
         <div class="clip-sub">
-          <span>${c.start}–${c.end}</span><i></i><span>${c.vertical ? "9:16" : "Source"}</span><i></i><span>${c.status === "failed" ? "Failed" : c.status === "rendering" ? "Rendering" : (c.captions ? "Captions" : "Clean")}</span>${note ? `<i></i>${note}` : ""}
+          <span>${c.start}–${c.end}</span><i></i><span>${c.vertical ? "9:16" : "Source"}</span><i></i><span>${c.status === "failed" ? "Failed" : c.status === "rendering" ? "Rendering" : c.status === "pending" ? "Queued" : (c.captions ? "Captions" : "Clean")}</span>${note ? `<i></i>${note}` : ""}
         </div>
+        ${c.renderError ? `<p class="clip-err">${esc(c.renderError.slice(0, 140))}</p>` : ""}
         ${c.status === "failed" && c.error ? `<p class="clip-err">${esc(c.error.slice(0, 140))}</p>` : ""}
       </div>
     </article>`;
@@ -806,6 +812,17 @@
   }
   $("#continueRun").addEventListener("click", continueFromCurrentJob);
   $("#continueClips").addEventListener("click", continueFromCurrentJob);
+  $("#retryFailed").addEventListener("click", async () => {
+    if (!state.jobId) { toast("Open a job first", "i-lock"); return; }
+    try {
+      const r = await fetch(`/api/retry-failed/${state.jobId}`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not retry failed clips");
+      if (!d.retrying) { toast("All clips are rendered", "i-check"); return; }
+      toast(`Rendering ${d.retrying} remaining clips`, "i-refresh");
+      attachJob(state.jobId, state.jobs.find((j) => j.id === state.jobId)?.label || "Retry");
+    } catch (e) { toast(esc(e.message)); }
+  });
 
   /* ---------------- persistent library / settings ---------------- */
   async function loadLibrary() {

@@ -29,7 +29,7 @@ First run downloads a ~75 MB Whisper model.
 - Follow-ups like *“make them vertical with captions”* re-render existing clips.
 
 ### Free speed + reliability
-- Parallel rendering (2 workers by default, up to 3) with automatic NVENC/QSV/AMF encoder detection.
+- Parallel rendering (2 workers by default, up to 3) with automatic NVENC/QSV/AMF detection **and a real test encode** — if a GPU driver is unavailable, it silently falls back to CPU `libx264` instead of failing every clip.
 - Content-hash caches for sections, transcripts, audio signals and AI selections — reclipping a source avoids repeat work.
 - Draft renders at 360p for review before spending time on finals.
 - Stream-copy remux path when no reframing/captions are needed.
@@ -89,6 +89,8 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 | `ASR_MAX_WORKERS` | `2` parallel chunk requests (capped 1–3; higher values trigger Groq 429s) |
 | `AI_TIMEOUT` | `20` seconds per free-model call before failover |
 | `RENDER_WORKERS` | `2` parallel clip renders (capped 1–3) |
+| `RENDER_TIMEOUT` | `480` seconds per render before a hung ffmpeg is stopped |
+| `SECTION_TIMEOUT` | `240` seconds per HLS section fetch before retrying |
 | `WHISPER_MODEL` | `tiny` (local default, fast) or `base` (slower, more accurate) |
 | `WHISPER_BEAM` | `1` (default) |
 
@@ -114,7 +116,7 @@ work/           # uploads, audio, sections, subs, clips (gitignored)
 - `POST /api/chat` (form: message, optional job_id)
 - `GET /api/status/{id}`, `GET /api/clips/{id}/{n}`, `POST /api/render/{id}`, `GET /api/transcript/{id}`
 - `POST /api/render-selected/{id}`, `POST /api/continue/{id}`, `POST /api/regenerate/{id}/{n}`
-- `POST /api/cancel/{id}`, `POST /api/retry/{id}/{n}`
+- `POST /api/cancel/{id}`, `POST /api/retry/{id}/{n}`, `POST /api/retry-failed/{id}` (renders every failed or queued clip)
 - `GET /api/library`, `GET /api/jobs/{id}`, `PUT /api/clips/{id}/{n}/note`
 - `GET/POST /api/presets`, `POST /api/presets/bulk`, `GET/POST /api/dictionary`, `GET/POST /api/publish-queue`
 - `GET /api/hardware`, `GET /api/asr/status`
