@@ -56,6 +56,14 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _friendly_error(exc: Exception) -> str:
+    msg = str(exc)
+    low = msg.lower()
+    if "subscriber-only" in low or "must be logged into an account that has access" in low:
+        return "This VOD is subscriber-only. Use a public VOD, upload a local copy, or import a transcript."
+    return msg
+
+
 def _persist(job_id: str) -> None:
     job = jobs.get(job_id)
     if not job:
@@ -494,7 +502,7 @@ def _url_pipeline(job_id: str):
         _render_all(job_id)
     except Exception as e:  # noqa: BLE001
         _set(job_id, status="cancelled" if _cancelled(job_id) else "error",
-             progress=100, message=str(e), error=str(e))
+             progress=100, message=_friendly_error(e), error=_friendly_error(e))
 
 
 def _pipeline(job_id: str):
@@ -518,7 +526,7 @@ def _pipeline(job_id: str):
         _render_all(job_id)
     except Exception as e:  # noqa: BLE001
         _set(job_id, status="cancelled" if _cancelled(job_id) else "error",
-             progress=100, message=str(e), error=str(e))
+             progress=100, message=_friendly_error(e), error=_friendly_error(e))
 
 
 def _pipeline_from_transcript(job_id: str):
@@ -543,7 +551,7 @@ def _pipeline_from_transcript(job_id: str):
         _render_all(job_id)
     except Exception as e:  # noqa: BLE001
         _set(job_id, status="cancelled" if _cancelled(job_id) else "error",
-             progress=100, message=str(e), error=str(e))
+             progress=100, message=_friendly_error(e), error=_friendly_error(e))
 
 
 # ----------------------------- API routes -----------------------------
@@ -562,7 +570,7 @@ async def source_info(body: UrlBody):
     try:
         return {"ok": True, **resolve_url(body.url)}
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"Could not read that link: {e}")
+        raise HTTPException(400, f"Could not read that link: {_friendly_error(e)}")
 
 
 @app.post("/api/clip-url")
