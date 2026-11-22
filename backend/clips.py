@@ -65,16 +65,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         s = total % 60
         return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
-    events = []
-    # Group words into subtitle lines of ~6 words / 3.5s
+    # ASR chunk boundaries can produce duplicate/overlapping words. Normalise
+    # first, otherwise libass renders several captions on top of each other.
     relevant = [w for w in words if float(w.get("end", 0)) > start and float(w.get("start", 0)) < end]
-    if not relevant:
+    relevant.sort(key=lambda w: (float(w.get("start", 0)), float(w.get("end", 0))))
+    clean: list[dict] = []
+    for w in relevant:
+        ws = float(w.get("start", 0))
+        we = max(ws + 0.08, float(w.get("end", ws + 0.2)))
+        if clean and ws < clean[-1]["_end"] - 0.05:
+            # Overlapping word (another speaker or duplicated chunk) — skip
+            # unless it is meaningfully later, to keep one caption line at a time.
+            if clean[-1]["_word"] == str(w.get("word", "")).strip():
+                continue
+            ws = clean[-1]["_end"]
+            we = max(we, ws + 0.08)
+        item = dict(w)
+        item["_start"], item["_end"] = ws, we
+        item["_word"] = str(w.get("word", "")).strip()
+        clean.append(item)
+    if not clean:
         return False
 
+    events: list[str] = []
     chunk: list[dict] = []
-    for w in relevant:
+    for w in clean:
         chunk.append(w)
-        chunk_dur = float(chunk[-1].get("end", 0)) - float(chunk[0].get("start", 0))
+        chunk_dur = chunk[-1]["_end"] - chunk[0]["_start"]
         if len(chunk) >= 4 or chunk_dur >= 2.5:
             events.append(_ass_event(chunk, start, ts, _esc_ass))
             chunk = []
@@ -87,12 +104,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _ass_event(chunk: list[dict], clip_start: float, ts, esc) -> str:
-    line_start = float(chunk[0].get("start", clip_start))
-    line_end = float(chunk[-1].get("end", line_start + 1))
+    line_start = float(chunk[0].get("_start", chunk[0].get("start", clip_start)))
+    line_end = float(chunk[-1].get("_end", chunk[-1].get("end", line_start + 1)))
     parts = []
     for idx, w in enumerate(chunk):
-        ws = float(w.get("start", line_start))
-        we = float(w.get("end", ws + 0.2))
+        ws = float(w.get("_start", w.get("start", line_start)))
+        we = float(w.get("_end", w.get("end", ws + 0.2)))
         dur_cs = max(1, int((we - ws) * 100))
         parts.append(r"{\kf%d}%s " % (dur_cs, esc(str(w.get("word", "")))))
         if idx == 2 and len(chunk) > 3:  # wrap after 3 words to keep lines short
@@ -110,19 +127,32 @@ def render_clip(
     words: list[dict] | None = None,
     captions: bool = True,
     vertical: bool = False,
+    draft: bool = False,
+    encoder: str | None = None,
+    encoder_args: list[str] | None = None,
+    prefer_hardware: bool = True,
 ) -> dict[str, Any]:
     """Render a single clip. Returns info dict with ok/error."""
     start = float(clip["start"])
     end = float(clip["end"])
     duration = max(0.5, end - start)
 
+    if encoder is None or encoder_args is None:
+        import hardware
+        encoder, encoder_args = hardware.encoder_args(prefer_hardware)
+
     w, h = probe_size(input_path)
     # 720x1280 is still standard 9:16 for social feeds, but ~2.25x cheaper to
-    # encode than 1080x1920. On CPU this kept renders near 1x realtime.
-    out_w, out_h = (720, 1280) if vertical else (w, h)
+    # encode than 1080x1920. Drafts drop to 360p/15fps for fast review.
+    if draft:
+        out_w, out_h = (360, 640) if vertical else (max(2, w // 2), max(2, h // 2))
+    else:
+        out_w, out_h = (720, 1280) if vertical else (w, h)
+    fps = 15 if draft else 30
 
+    # Captions are skipped in drafts — the review pass is about timing.
     ass_path = out_path + ".ass"
-    made_ass = bool(captions and words and build_ass(words, start, end, out_w, out_h, ass_path))
+    made_ass = bool(captions and not draft and words and build_ass(words, start, end, out_w, out_h, ass_path))
     ass_filter = ""
     if made_ass:
         ass_arg = ass_path.replace("\\", "/").replace(":", "\\:")
@@ -131,15 +161,27 @@ def render_clip(
     def build_cmd(use_captions: bool) -> list[str]:
         cmd = ["-y", "-ss", f"{start:.3f}", "-i", input_path, "-t", f"{duration:.3f}"]
         af = ass_filter if use_captions else ""
+        # Fast path: no reframe, no captions, no draft — remux the section.
+        if not vertical and not af and not draft:
+            return cmd + ["-c", "copy", "-movflags", "+faststart", "-shortest", out_path]
         if vertical:
-            # Complex filtergraph needed (blurred background + overlay = 2 inputs)
-            # Blur a tiny copy and scale it back up — visually identical to
-            # blurring at full size but ~10x faster on CPU. Cap at 30fps.
+            # Punch-in reframe: crop a 9:16 window around the subject instead of
+            # shrinking the whole 16:9 frame into a tiny letterbox. ``focus`` is
+            # a normalised (0..1) crop centre from face detection; fallback to
+            # centre. The game stays readable because we crop, not scale down.
+            focus = clip.get("focus") or {}
+            fx = max(0.0, min(1.0, float(focus.get("cx", 0.5))))
+            fy = max(0.0, min(1.0, float(focus.get("cy", 0.45))))
+            crop_w = max(2, int(h * 9 / 16) // 2 * 2)
+            crop_h = h
+            max_x = max(0, w - crop_w)
+            x0 = int(round(fx * max_x)) // 2 * 2
+            # Bias slightly upward so captions at the bottom don't cover faces.
+            y0 = 0
             fc = (
-                "[0:v]scale=180:320:force_original_aspect_ratio=increase,"
-                "crop=180:320,boxblur=5:2,scale=720:1280[bg];"
-                "[0:v]scale=720:1280:force_original_aspect_ratio=decrease[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1,fps=30[v]"
+                f"[0:v]crop={crop_w}:{crop_h}:{x0}:{y0},"
+                f"scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                f"crop={out_w}:{out_h},fps={fps}[v]"
             )
             if af:
                 fc += f";[v]{af}[vout]"
@@ -150,7 +192,7 @@ def render_clip(
         elif af:
             cmd += ["-vf", af]
         cmd += [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:v", encoder, *encoder_args,
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart", "-shortest", out_path,
         ]

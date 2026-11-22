@@ -13,6 +13,7 @@ All backends return the same shape:
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -34,7 +35,9 @@ CHUNK_SECONDS = int(os.getenv("ASR_CHUNK_SECONDS", "600"))  # 10 min
 # Groq's free tier throttles bursts hard: 8 workers failed ~40% of chunks,
 # 4 workers failed ~60%. Gentle sequential uploads succeed ~100%. With retries
 # this still finishes a 7h VOD in minutes, and avoids the slow local fallback.
-MAX_WORKERS = int(os.getenv("ASR_MAX_WORKERS", "1"))
+# Two gentle workers with exponential backoff is the safe middle ground:
+# it roughly doubles Groq throughput without the 429 storm seen at 4+ workers.
+MAX_WORKERS = max(1, min(3, int(os.getenv("ASR_MAX_WORKERS", "2"))))
 ASR_BACKEND = os.getenv("ASR_BACKEND", "auto").lower()
 
 
@@ -76,7 +79,7 @@ def _split_audio(audio_path: str | Path, work_dir: Path) -> list[tuple[Path, flo
 
 
 def _transcribe_groq_chunk(client: httpx.Client, path: Path, offset: float,
-                           retries: int = 4) -> dict:
+                           retries: int = 5) -> dict:
     """Transcribe one chunk, retrying throttles/5xx with exponential backoff."""
     for attempt in range(retries):
         with open(path, "rb") as f:
@@ -94,7 +97,8 @@ def _transcribe_groq_chunk(client: httpx.Client, path: Path, offset: float,
         if r.status_code == 200:
             return {"data": r.json(), "offset": offset}
         if r.status_code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-            time.sleep((attempt + 1) * 6)  # 6s, 12s, 18s
+            wait = min(30, 3 * (2 ** attempt)) + random.uniform(0, 1.5)
+            time.sleep(wait)  # 3s, 6s, 12s, 24s — capped, with jitter
             continue
         raise RuntimeError(f"Groq {r.status_code}: {r.text[:200]}")
     raise RuntimeError("Groq: exhausted retries")

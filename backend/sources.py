@@ -198,8 +198,17 @@ def download_audio(url: str, out_path: Path, max_minutes: float | None = None,
     return result
 
 
+_MEDIA_URL_CACHE: dict[str, tuple[str, list[str]]] = {}
+
+
 def _resolve_media_url(url: str) -> tuple[str, list[str]]:
-    """Resolve the direct HLS/file URL (no download) plus ffmpeg header args."""
+    """Resolve the direct HLS/file URL (no download) plus ffmpeg header args.
+
+    yt-dlp metadata extraction takes ~1-2 minutes per Twitch VOD, so cache the
+    result per source — all clip sections of one job share the same stream.
+    """
+    if url in _MEDIA_URL_CACHE:
+        return _MEDIA_URL_CACHE[url]
     with yt_dlp.YoutubeDL({**_base_opts(), "skip_download": True}) as ydl:
         info = ydl.extract_info(url, download=False)
     media_url = info.get("url")
@@ -210,7 +219,9 @@ def _resolve_media_url(url: str) -> tuple[str, list[str]]:
     if headers:
         # ffmpeg expects one -headers string with CRLF-separated lines.
         header_args = ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
-    return media_url, header_args
+    result = (media_url, header_args)
+    _MEDIA_URL_CACHE[url] = result
+    return result
 
 
 def download_section(url: str, start: float, end: float, out_path: Path) -> Path:

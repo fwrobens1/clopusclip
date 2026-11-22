@@ -1,6 +1,6 @@
-# ClipForge
+# NoetharaClipz
 
-A working AI clipping workspace — paste a link (YouTube, Twitch, Kick, 1000+ sites) or upload a file, describe what you want in plain language, and get viral-ready clips with animated captions and vertical reframing. Dark charcoal, Linear-inspired UI with a conversational agent.
+A working AI clipping workspace — paste a link (YouTube, Twitch, Kick, 1000+ sites) or upload a file, describe what you want in plain language, and get viral-ready clips with animated captions and vertical reframing. Dark charcoal dashboard UI with your logo, NOCTX branding, and a conversational agent.
 
 ## Quick start
 
@@ -28,9 +28,24 @@ First run downloads a ~75 MB Whisper model.
 - The agent extracts the URL, creative brief, clip count, length, captions and format from your message, starts the job, and reports back when it's done.
 - Follow-ups like *“make them vertical with captions”* re-render existing clips.
 
+### Free speed + reliability
+- Parallel rendering (2 workers by default, up to 3) with automatic NVENC/QSV/AMF encoder detection.
+- Content-hash caches for sections, transcripts, audio signals and AI selections — reclipping a source avoids repeat work.
+- Draft renders at 360p for review before spending time on finals.
+- Stream-copy remux path when no reframing/captions are needed.
+- Cooperative cancel, per-clip retry with fresh HLS URL, and fresh-URL retry on failed section downloads.
+- AI timeout is short by default (`AI_TIMEOUT=20`) with fast models first, so a stalled free provider cannot freeze a job.
+
 ### UI
-- Charcoal/near-black workspace inspired by Linear, with an AI-native component vocabulary (task rows, tool chips, status states, elapsed-time loader, command bar).
-- Three views: **Studio** (run jobs), **Agent** (chat), **Clips** (session results).
+- Charcoal/near-black **NoetharaClipz v2** dashboard with your logo, compact sidebar, composer, session rail, clip cards, and editor shell.
+- Four views: **Studio** (run jobs), **Agent** (chat), **Clips** (session results), **Library** (sources grouped by streamer), plus a clip preview editor.
+- Real backend wiring: link preview, URL/upload/transcript jobs, live progress, results, chat, downloads, and re-renders.
+- **Review before render**: rank moments first, pick checkboxes, scrub 360p drafts, regenerate a weak moment, then render only the keepers.
+- **Continue clipping**: find the next batch from a long VOD while excluding moments already used.
+- **Payoff-aware timing**: extends and merges clips through reactions like the granny sequence and suppressor killing spree instead of stopping on the setup.
+- **Publishing queue**: prepare TikTok + YouTube Shorts titles, copy and exactly 5 tags, save locally, and copy a post package.
+- **Local memory**: caption dictionary, per-streamer crop presets, kept/flopped notes, publish queue, and cached transcripts/audio/sections survive restarts.
+- **Editor extras**: choose between 3 generated hooks with a live overlay, save the current facecam position as a streamer preset, and use J/K/L playback + 1/2/3 view shortcuts.
 - Restrained accents, hairline borders, gliding hover states — no generic purple-gradient AI look.
 
 ## Making "7 hours in 30 minutes" real
@@ -43,7 +58,7 @@ Groq's `whisper-large-v3-turbo` on LPU is extremely fast. ClipForge splits the a
 - Get a **free** key at https://console.groq.com (no credit card; 14,400 requests/day).
 - Add to `.env`: `GROQ_API_KEY=gsk_...`
 - Restart. The topbar chip changes to `⚡ Groq turbo`.
-- Tune with `ASR_CHUNK_SECONDS` (default 600) and `ASR_MAX_WORKERS` (default 8).
+- Tune with `ASR_CHUNK_SECONDS` (default 600) and `ASR_MAX_WORKERS` (default 2, capped 1–3 — higher values trigger Groq 429s).
 
 ### 2. Free GPU notebook (no API key)
 Run `notebooks/free_gpu_asr.ipynb` on **Kaggle** (30 GPU h/week, T4), **Colab** (T4), **Lightning AI** (80 GPU h/month), or **SageMaker Studio Lab**. It downloads audio, transcribes with `large-v3` on the T4 GPU, and exports `transcript.json`. Then in ClipForge click **↥ Import transcript** and paste the same URL — clip selection and rendering happen locally with zero local transcription.
@@ -71,7 +86,9 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 | `GROQ_API_KEY` | Free key from console.groq.com — enables fast parallel ASR |
 | `GROQ_ASR_MODEL` | `whisper-large-v3-turbo` (default) |
 | `ASR_CHUNK_SECONDS` | `600` (10 min chunks for parallel transcription) |
-| `ASR_MAX_WORKERS` | `8` parallel chunk requests |
+| `ASR_MAX_WORKERS` | `2` parallel chunk requests (capped 1–3; higher values trigger Groq 429s) |
+| `AI_TIMEOUT` | `20` seconds per free-model call before failover |
+| `RENDER_WORKERS` | `2` parallel clip renders (capped 1–3) |
 | `WHISPER_MODEL` | `tiny` (local default, fast) or `base` (slower, more accurate) |
 | `WHISPER_BEAM` | `1` (default) |
 
@@ -92,7 +109,12 @@ work/           # uploads, audio, sections, subs, clips (gitignored)
 ## API
 
 - `POST /api/source` (JSON `{"url":...}`) — resolve a link, return metadata
-- `POST /api/clip-url` (form: url, num_clips, clip_length, captions, vertical, goal)
+- `POST /api/clip-url` (form: url, num_clips, clip_length, captions, vertical, goal, review, draft)
 - `POST /api/upload` (multipart file + options)
 - `POST /api/chat` (form: message, optional job_id)
 - `GET /api/status/{id}`, `GET /api/clips/{id}/{n}`, `POST /api/render/{id}`, `GET /api/transcript/{id}`
+- `POST /api/render-selected/{id}`, `POST /api/continue/{id}`, `POST /api/regenerate/{id}/{n}`
+- `POST /api/cancel/{id}`, `POST /api/retry/{id}/{n}`
+- `GET /api/library`, `GET /api/jobs/{id}`, `PUT /api/clips/{id}/{n}/note`
+- `GET/POST /api/presets`, `POST /api/presets/bulk`, `GET/POST /api/dictionary`, `GET/POST /api/publish-queue`
+- `GET /api/hardware`, `GET /api/asr/status`
