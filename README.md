@@ -44,7 +44,8 @@ First run downloads a ~75 MB Whisper model.
 - **Continue clipping**: find the next batch from a long VOD while excluding moments already used.
 - **Payoff-aware timing**: extends and merges clips through reactions like the granny sequence and suppressor killing spree instead of stopping on the setup.
 - **Publishing queue**: prepare TikTok + YouTube Shorts titles, copy and exactly 5 tags, save locally, and copy a post package.
-- **Local memory**: caption dictionary, per-streamer crop presets, kept/flopped notes, publish queue, and cached transcripts/audio/sections survive restarts.
+- **Cloud clip storage**: finished MP4s upload to the Supabase `rendered-clips` bucket and are removed from local disk after verification. The dashboard streams them through short-lived signed URLs, so no long-lived key reaches the browser.
+- **Local memory**: caption dictionary, per-streamer crop presets, kept/flopped notes, publish queue, and cached transcripts/audio/sections survive restarts. Job and clip metadata is also mirrored into `noethara_jobs` / `noethara_clips` in Supabase.
 - **Editor extras**: choose between 3 generated hooks with a live overlay, save the current facecam position as a streamer preset, and use J/K/L playback + 1/2/3 view shortcuts.
 - Restrained accents, hairline borders, gliding hover states — no generic purple-gradient AI look.
 
@@ -93,6 +94,15 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 | `SECTION_TIMEOUT` | `240` seconds per HLS section fetch before retrying |
 | `WHISPER_MODEL` | `tiny` (local default, fast) or `base` (slower, more accurate) |
 | `WHISPER_BEAM` | `1` (default) |
+| `SUPABASE_URL` | Project REST URL, e.g. `https://<ref>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used for Storage uploads and metadata sync |
+| `SUPABASE_BUCKET` | Storage bucket for finished clips (`rendered-clips`) |
+| `SUPABASE_SIGNED_TTL` | `3600` seconds — lifetime of playback URLs |
+| `SUPABASE_TIMEOUT` | `120` seconds per upload |
+
+To recreate the cloud tables in a fresh project, run `backend/supabase_schema.sql`.
+One-time migration of existing local clips: `venv/Scripts/python.exe backend/migrate_to_supabase.py`.
+`GET /api/cloud/status` reports the active bucket and connection state.
 
 ## Structure
 

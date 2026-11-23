@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -26,13 +26,14 @@ load_dotenv(ROOT / ".env")
 import agent  # noqa: E402
 import asr  # noqa: E402
 import cache  # noqa: E402
+import cloud  # noqa: E402
 import dictionary  # noqa: E402
 import hardware  # noqa: E402
 import library  # noqa: E402
 import payoff  # noqa: E402
 import sources  # noqa: E402
 from ai import chat_json_strong, select_clips  # noqa: E402
-from clips import probe_duration, render_clip  # noqa: E402
+from clips import probe_duration, probe_size, render_clip  # noqa: E402
 from sources import download_audio, download_section, download_transcript, resolve as resolve_url  # noqa: E402
 
 UPLOAD_DIR = ROOT / "work" / "uploads"
@@ -85,6 +86,8 @@ def _persist(job_id: str) -> None:
         "asr_backend": job.get("asr_backend"),
         "language": job.get("language"),
         "channel": job.get("channel") or library.channel_for(job.get("source_info"), job.get("source_url")),
+        "title": job.get("title") or (job.get("source_info") or {}).get("title") or job.get("filename") or job.get("goal") or job_id,
+        "thumbnail": job.get("thumbnail") or (job.get("source_info") or {}).get("thumbnail"),
         "created_at": job.get("created_at") or _now(),
         "parent_job": job.get("parent_job"),
         "notes": job.get("notes", {}),
@@ -93,6 +96,12 @@ def _persist(job_id: str) -> None:
     }
     library.save_job_detail(job_id, detail)
     library.upsert_job(detail)
+    if cloud.enabled():
+        try:
+            cloud.save_job(detail)
+            cloud.save_clips(job_id, detail.get("clips") or [])
+        except Exception as e:  # noqa: BLE001 — cloud must never break a local job
+            print(f"[cloud] sync failed for {job_id}: {e}", flush=True)
 
 
 def _set(job_id: str, **kwargs):
@@ -431,6 +440,25 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
             clip["error"] = None
             clip["render_error"] = None
             clip["encoder"] = result.get("encoder")
+            if result.get("size"):
+                clip["size_bytes"] = result["size"]
+            try:
+                clip["width"], clip["height"] = probe_size(str(out_path))
+            except Exception:  # noqa: BLE001
+                pass
+            if not draft and cloud.enabled():
+                try:
+                    dest = cloud.upload_file(out_path, f"{job_id}/{i}.mp4")
+                    clip["storage_path"] = dest
+                    clip["cloud"] = True
+                    # Cloud copy is verified; release local disk immediately.
+                    try:
+                        out_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                except Exception as e:  # noqa: BLE001
+                    clip["cloud_error"] = str(e)[:400]
+                    print(f"[cloud] upload failed for {job_id}/{i}: {e}", flush=True)
         else:
             _mark_render_failure(clip, result.get("error", "render failed"))
     except Exception as e:  # noqa: BLE001
@@ -1107,6 +1135,15 @@ async def render_selection(body: SelectionBody):
 
 @app.get("/api/clips/{job_id}/{index}")
 def get_clip(job_id: str, index: int, draft: int = 0):
+    job = jobs.get(job_id)
+    clip = None
+    if job and 0 <= index < len(job.get("clips") or []):
+        clip = job["clips"][index]
+    if not draft and clip and clip.get("storage_path") and cloud.enabled():
+        try:
+            return RedirectResponse(cloud.signed_url(clip["storage_path"]), status_code=302)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"Could not open cloud clip: {e}")
     name = f"{job_id}_draft_{index}.mp4" if draft else f"{job_id}_clip_{index}.mp4"
     path = CLIP_DIR / name
     if not path.exists():
@@ -1114,6 +1151,11 @@ def get_clip(job_id: str, index: int, draft: int = 0):
     if not path.exists():
         raise HTTPException(404, "Clip not found")
     return FileResponse(str(path), media_type="video/mp4", filename=f"clip_{index + 1}.mp4")
+
+
+@app.get("/api/cloud/status")
+def cloud_status():
+    return cloud.status()
 
 
 @app.get("/api/transcript/{job_id}")
