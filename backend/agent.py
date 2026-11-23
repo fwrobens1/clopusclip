@@ -1,4 +1,4 @@
-"""Conversational agent: turns natural language into clipping tasks and reports back."""
+"""Conversational agent: turns natural language into clipping tasks and talks like a real assistant."""
 from __future__ import annotations
 
 import re
@@ -7,6 +7,74 @@ from typing import Any
 from ai import chat, chat_json
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+")
+
+# Fast, deterministic answers for common questions about the product. These keep the
+# agent conversational even when a free model times out or falls back.
+CAPABILITY_ANSWERS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("live", "livestream", "real time", "realtime", "in realtime"),
+        "Yes — the Live view records a stream and clips it in rolling passes while it's on. "
+        "It's a local MVP: the machine running it needs to stay on with disk space for the buffer. "
+        "Finished VODs are still the easiest path.",
+    ),
+    (
+        ("youtube", "twitch", "kick", "platform", "what sites", "which sites", "1000"),
+        "Paste a YouTube, Twitch or Kick link — yt-dlp covers 1000+ sites. Subtitle-first when captions exist, "
+        "audio-only fallback otherwise. No full VOD download.",
+    ),
+    (
+        ("caption", "subtitle", "transcript"),
+        "Captions are word-level and burned in when you ask for them. If the source has no subtitle track, "
+        "Groq turbo transcribes the audio in minutes, or you can import a transcript you made elsewhere.",
+    ),
+    (
+        ("cloud", "storage", "supabase", "where are my clips", "disk", "space"),
+        "Finished clips upload to a private Supabase bucket and the dashboard plays them through signed links, "
+        "so your machine doesn't hold the MP4s. Source audio and sections stay local and are cached.",
+    ),
+    (
+        ("free", "price", "cost", "credit card", "pay"),
+        "The app itself is free. AI selection runs on free NVIDIA NIM models and ASR can use a free Groq key, "
+        "local Whisper, or a free Kaggle/Colab notebook. No card needed.",
+    ),
+    (
+        ("gpu", "render", "fast", "how long", "7 hour", "seven hour", "minutes"),
+        "The bottleneck is transcription, not cutting. With Groq turbo a 7-hour VOD is transcribed in minutes, "
+        "then only the slices you keep get rendered — locally, with GPU encoding when available and CPU fallback.",
+    ),
+)
+
+CAPABILITY_CUES = (
+    "can you", "could you", "do you", "does it", "does this", "is it", "are you",
+    "what can", "what do you", "how do", "how does", "why do", "do i need",
+    "support", "capable", "possible", "work with", "built for", "who are you", "what are you",
+)
+
+
+def is_conversational(message: str) -> bool:
+    """True when the message is a question/chat, not a request to produce clips."""
+    text = (message or "").strip().lower()
+    if not text:
+        return True
+    if extract_url(text):
+        return False
+    if any(cue in text for cue in CAPABILITY_CUES):
+        return True
+    # Bare questions and short greetings/chat are conversational too.
+    if text.endswith("?") and not re.search(r"\b(clip|render|make|cut|create)\b\s+\d", text):
+        return True
+    if len(text.split()) <= 4 and not re.search(r"\b(clip|render|cut|make|rerender)\b", text):
+        return True
+    return False
+
+
+def quick_answer(message: str) -> str | None:
+    """Return a deterministic answer for common capability questions, if matched."""
+    text = (message or "").lower()
+    for cues, answer in CAPABILITY_ANSWERS:
+        if any(cue in text for cue in cues):
+            return answer
+    return None
 
 
 def extract_url(text: str) -> str | None:
@@ -49,9 +117,10 @@ Return ONLY a JSON object with these exact keys:
   "vertical": true/false (default true)
 }}
 Rules:
-- "clip" when there is a URL or clear request to make clips.
+- "clip" ONLY when there is a URL or an explicit imperative request to make clips (e.g. "clip this", "make 5 clips of ...").
 - "rerender" when the user asks to change captions/format/length of an existing result.
-- "chat" for greetings or questions with no clipping request.
+- "chat" for greetings, questions and capability checks — INCLUDING sentences containing the word "clip", such as "can you clip lives?", "do you support Twitch?", "what can you do?", "how do you clip?". These are questions about the app, NOT clipping tasks.
+- Never mark a capability question as "clip". No URL means no new job unless the user clearly points at an existing source and asks for clips.
 - If the user says "funny/funniest/hilarious", put that in goal.
 - If the user says "shorts/vertical/9:16" set vertical true; "widescreen/horizontal" set vertical false.
 - If the user says "no captions" set captions false.
@@ -88,15 +157,37 @@ No extra keys, no markdown."""
 
 
 def reply(message: str, context: str = "") -> str:
-    """Generate a short conversational reply, optionally grounded in job context."""
+    """Generate a short conversational reply, optionally grounded in job context.
+
+    IMPORTANT: a question about the app is a real conversation — answer it. Only
+    report on a job when the user actually asks about that job or a job was just
+    started/completed by this message. Never paste a stale job report into every reply.
+    """
+    text = (message or "").strip()
+    conversational = is_conversational(text)
+
+    if conversational:
+        quick = quick_answer(text)
+        if quick:
+            return quick
+
     system = (
-        "You are ClipForge's agent — a concise, capable video-clipping assistant. "
-        "Be direct and warm. Never mention being an AI. Keep replies under 3 sentences. "
-        "When a job completed, summarize what was produced and invite a follow-up."
+        "You are the NoetharaClipz agent — a concise, capable assistant for a video clipping app. "
+        "Answer the user's ACTUAL message first. If they ask a question about what the app can do, "
+        "answer that question directly and stay on topic — do not volunteer a report about old clips. "
+        "Be direct and warm, like a helpful teammate. Never mention being an AI. "
+        "Keep replies under 3 sentences. "
+        "Only mention clip counts, titles or render status when the user asks about a specific job "
+        "or when you have just started/finished one in this turn. "
+        "Capabilities: Twitch/YouTube/Kick links via yt-dlp; subtitle-first ingestion with Groq turbo ASR "
+        "or local Whisper; payoff-aware moment scoring with reasons; review before render with 360p drafts; "
+        "facecam-top/gameplay-bottom 9:16 reframing; word-level captions; a local Live view that clips "
+        "streams in rolling passes; clips stored in Supabase and played via signed links; "
+        "a publish queue for TikTok/YouTube Shorts."
     )
-    user = message.strip()
-    if context:
-        user += f"\n\nCurrent job context:\n{context}"
+    user = text
+    if context and not conversational:
+        user += f"\n\nRelevant current job context (use only if the user asks about it):\n{context}"
     try:
         return chat(
             [

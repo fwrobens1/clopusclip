@@ -1604,6 +1604,12 @@ def _chat_tool_request(message: str) -> tuple[str, dict] | None:
 @app.post("/api/chat")
 async def chat(message: str = Form(...), job_id: str | None = Form(None)):
     parsed = agent.parse_request(message)
+    # A question about the app is a conversation, never a new clipping job.
+    # Without this, phrases like "can you clip lives?" get parsed as "clip" and
+    # drag stale job context into what should be a normal answer.
+    conversational = agent.is_conversational(message)
+    if conversational and not parsed.get("url"):
+        parsed["action"] = "chat"
     tool_request = _chat_tool_request(message)
     if tool_request:
         tool_name, tool_args = tool_request

@@ -1502,10 +1502,14 @@
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || "Agent failed");
       typing.remove();
-      const tools = [{ text: "brief parsed", ok: true }];
-      if (d.parsed?.num_clips) tools.push({ text: `${d.parsed.num_clips} clips` });
-      if (d.parsed?.vertical) tools.push({ text: "9:16" });
-      if (d.parsed?.captions) tools.push({ text: "captions" });
+      // Only show job chips when the agent actually parsed/started a clipping job.
+      // Conversational answers (questions, capability checks) should read like a
+      // normal reply, not a fake status report.
+      const isJob = d.parsed?.action === "clip" || d.parsed?.action === "rerender" || !!d.tool_result;
+      const tools = isJob ? [{ text: d.parsed?.action === "rerender" ? "re-render" : "brief parsed", ok: true }] : [];
+      if (isJob && d.parsed?.num_clips) tools.push({ text: `${d.parsed.num_clips} clips` });
+      if (isJob && d.parsed?.vertical) tools.push({ text: "9:16" });
+      if (isJob && d.parsed?.captions) tools.push({ text: "captions" });
       addAgent(d.reply || "Done.", tools);
       if (d.job_id && d.parsed?.action === "clip") {
         state.chatActiveJob = d.job_id;
@@ -1672,6 +1676,58 @@
     toast("Hook selected — re-render to apply it", "i-cap");
   });
 
+  // Build timeline filmstrip + caption chips from the real clip (no baked-in placeholders).
+  function paintFilmstrip(c) {
+    const frames = $$(".tl-film .ed-f0, .tl-film .ed-f1, .tl-film .ed-f2");
+    const capsRoot = $("#tlCaps");
+    const meta = $("#tlMeta");
+    if (meta) meta.textContent = `${Number(c.end) - Number(c.start) || 0}s · ${c.vertical ? "9:16" : "source"}`;
+    if (capsRoot) {
+      const words = String(c.cap || (c.hooks || [])[Number(c.hook_index || 0)] || "")
+        .split(/\s+/).filter(Boolean).slice(0, 4);
+      capsRoot.innerHTML = words.map((w, i) =>
+        `<span class="tl-cap" style="left:${4 + i * 24}%;width:${Math.min(22, w.length * 1.7 + 6)}%">${esc(w)}</span>`
+      ).join("");
+    }
+    if (!c.url || !frames.length) return;
+    // Try to sample real frames; if CORS blocks canvas, the neutral gradient stays.
+    const probe = document.createElement("video");
+    probe.muted = true;
+    probe.playsInline = true;
+    probe.preload = "auto";
+    probe.crossOrigin = "anonymous";
+    probe.src = c.url;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    const count = frames.length;
+    let done = 0;
+    const grab = (idx) => new Promise((resolve) => {
+      const seek = () => {
+        const d = probe.duration || 0;
+        if (!d) return resolve();
+        probe.currentTime = Math.min(Math.max(0.1, d * (idx + 0.5) / count), d - 0.05);
+      };
+      probe.removeEventListener("seeked", onSeeked);
+      const onSeeked = () => {
+        try {
+          canvas.width = 72; canvas.height = 128;
+          ctx.drawImage(probe, 0, 0, canvas.width, canvas.height);
+          frames[idx].style.backgroundImage = `url("${canvas.toDataURL("image/jpeg", 0.6)}")`;
+        } catch (e) { /* CORS tainted canvas — keep neutral placeholder */ }
+        resolve();
+      };
+      probe.addEventListener("seeked", onSeeked, { once: true });
+      seek();
+      setTimeout(resolve, 4000);
+    });
+    probe.addEventListener("loadeddata", async () => {
+      for (let i = 0; i < count; i++) await grab(i);
+      probe.removeAttribute("src");
+      probe.load();
+    }, { once: true });
+    probe.addEventListener("error", () => { probe.removeAttribute("src"); }, { once: true });
+  }
+
   function openEditor(i) {
     const c = state.clips[i];
     if (!c || c.status !== "ready") return;
@@ -1702,6 +1758,7 @@
     state.editorDirty = false;
     $("#editorState").textContent = "Ready";
     setHookOverlay((c.hooks || [])[Number(c.hook_index || 0)] || c.title || "");
+    paintFilmstrip(c);
     paintTime();
   }
   if (edVideo) {
