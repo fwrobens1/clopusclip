@@ -16,6 +16,24 @@
   };
   const looksLikeUrl = (s) => /^https?:\/\/\S+$/i.test((s || "").trim());
 
+  // Attach the Supabase access token to every local API call.
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init = {}) {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    let next = init;
+    if (url.startsWith("/api/") && window.ncAccess) {
+      const headers = new Headers(init.headers || {});
+      headers.set("Authorization", `Bearer ${window.ncAccess}`);
+      next = Object.assign({}, init, { headers });
+    }
+    return nativeFetch(input, next).then((r) => {
+      if (r.status === 401 && url.startsWith("/api/") && !url.startsWith("/api/auth/")) {
+        location.replace("/auth");
+      }
+      return r;
+    });
+  };
+
   const state = {
     mode: "link",
     source: null,
@@ -129,6 +147,8 @@
       const m = dd.querySelector(".menu");
       if (m) m.hidden = true;
     });
+    const top = $("#topAvatar");
+    if (top) top.setAttribute("aria-expanded", "false");
   }
   document.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-dd-btn]");
@@ -146,10 +166,24 @@
       btn.setAttribute("aria-expanded", String(!isOpen));
       const menu = dd.querySelector(".menu");
       if (menu) menu.hidden = isOpen;
+      if (dd.classList.contains("user-dd")) {
+        const top = $("#topAvatar");
+        if (top) top.setAttribute("aria-expanded", String(!isOpen));
+      }
       return;
     }
     if (e.target.closest(".menu-item")) closeMenus();
     else if (!e.target.closest(".menu")) closeMenus();
+  });
+  const topAvatar = $("#topAvatar");
+  if (topAvatar) topAvatar.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const chip = $(".user-dd [data-dd-btn]");
+    if (!chip) return;
+    if ($("#app").classList.contains("nav-rail")) $("#app").classList.remove("nav-rail");
+    if (window.innerWidth <= 900) $("#app").classList.add("nav-open");
+    setTimeout(() => chip.click(), 0);
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenus(); });
   window.addEventListener("scroll", () => closeMenus(), true);
@@ -200,7 +234,12 @@
   $$("[data-user-action]").forEach((b) => b.addEventListener("click", () => {
     closeMenus();
     const a = b.dataset.userAction;
-    toast(a === "Signed out" ? "This is a local workspace — nothing to sign out of" : `Account · ${a}`, "i-agent");
+    if (a === "Signed out") {
+      if (typeof window.ncSignOut === "function") window.ncSignOut();
+      else location.replace("/auth");
+      return;
+    }
+    toast(`Account · ${a}`, "i-agent");
   }));
   function toggleOpt(btn, key) {
     btn.addEventListener("click", () => {
@@ -1609,22 +1648,24 @@
   }
 
   /* ---------------- init ---------------- */
-  setReadyRunCard();
-  resetStats();
-  renderRecent();
-  renderQueue();
-  renderStudio();
-  renderAll();
-  checkAsr();
-  loadLibrary();
+  Promise.resolve(window.ncAuthReady).then(function () {
+    setReadyRunCard();
+    resetStats();
+    renderRecent();
+    renderQueue();
+    renderStudio();
+    renderAll();
+    checkAsr();
+    loadLibrary();
 
-  (function restoreJob() {
-    const shared = new URLSearchParams(location.search).get("job");
-    let id = shared || null;
-    if (!id) {
-      try { id = localStorage.getItem("nc_job") || localStorage.getItem("cf_job"); } catch (e) { /* ignore */ }
-    }
-    if (!id) return;
-    attachJob(id, shared ? "Shared job" : "Previous job");
-  })();
+    (function restoreJob() {
+      const shared = new URLSearchParams(location.search).get("job");
+      let id = shared || null;
+      if (!id) {
+        try { id = localStorage.getItem("nc_job") || localStorage.getItem("cf_job"); } catch (e) { /* ignore */ }
+      }
+      if (!id) return;
+      attachJob(id, shared ? "Shared job" : "Previous job");
+    })();
+  });
 })();

@@ -173,7 +173,7 @@
         <button class="icon-btn bell" data-toast="No new notifications" aria-label="Notifications">
           <svg class="ico" aria-hidden="true"><use href="#i-bell"/></svg>
         </button>
-        <button class="avatar" data-toast="Signed in as NOCTX" aria-label="Account">N</button>
+        <button class="avatar" id="topAvatar" data-user-menu-btn aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">N</button>
       </div>
     </header>
 
@@ -751,6 +751,7 @@
 </div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<script src="/static/auth-bootstrap.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

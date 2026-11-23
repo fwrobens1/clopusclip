@@ -15,8 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -25,6 +25,7 @@ load_dotenv(ROOT / ".env")
 
 import agent  # noqa: E402
 import asr  # noqa: E402
+import auth as supabase_auth  # noqa: E402
 import cache  # noqa: E402
 import cloud  # noqa: E402
 import dictionary  # noqa: E402
@@ -49,6 +50,30 @@ for d in (UPLOAD_DIR, AUDIO_DIR, CLIP_DIR, SECTION_DIR, SUBS_DIR, ASR_DIR, LIB_D
     d.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="NoetharaClipz API")
+
+PUBLIC_API = {
+    "/api/health",
+    "/api/public-config",
+    "/api/auth/verify",
+    "/api/auth/signup",
+    "/api/cloud/status",
+}
+_SIGNUP_ATTEMPTS: dict[tuple[str, str], list[float]] = {}
+_SIGNUP_LOCK = threading.Lock()
+
+# /api/clips is intentionally public: playback is protected by a short-lived
+# signed Supabase URL, and <video> elements cannot send an Authorization header.
+@app.middleware("http")
+async def require_supabase_user(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in PUBLIC_API and not path.startswith("/api/clips/"):
+        header = request.headers.get("authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not token or not supabase_auth.verify(token):
+            return JSONResponse({"detail": "Sign in to continue"}, status_code=401)
+    return await call_next(request)
+
+
 jobs: dict[str, dict] = {}
 RENDER_WORKERS = max(1, min(3, int(__import__("os").getenv("RENDER_WORKERS", "2"))))
 
@@ -632,6 +657,51 @@ def _pipeline_from_transcript(job_id: str):
 @app.get("/api/health")
 def health():
     return {"ok": True, "jobs": len(jobs), "encoder": hardware.ffmpeg_label()}
+
+
+@app.get("/api/public-config")
+def public_config():
+    return supabase_auth.public_config()
+
+
+@app.post("/api/auth/verify")
+async def auth_verify(request: Request):
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    user = supabase_auth.verify(token)
+    if not user:
+        raise HTTPException(401, "Invalid or expired session")
+    return {"ok": True, "user": {"id": user.get("id"), "email": user.get("email")}}
+
+
+class SignupBody(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/signup")
+async def auth_signup(body: SignupBody, request: Request):
+    email = (body.email or "").strip().lower()
+    password = body.password or ""
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(400, "Enter a valid email address")
+    if len(password) < 6 or len(password) > 128:
+        raise HTTPException(400, "Password must be 6–128 characters")
+
+    ip = request.client.host if request.client else "unknown"
+    key = (ip, email)
+    now = time.time()
+    with _SIGNUP_LOCK:
+        recent = [t for t in _SIGNUP_ATTEMPTS.get(key, []) if now - t < 3600]
+        if len(recent) >= 5:
+            raise HTTPException(429, "Too many attempts. Try again later.")
+        recent.append(now)
+        _SIGNUP_ATTEMPTS[key] = recent
+
+    result = supabase_auth.signup(email, password)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "Could not create account")
+    return result
 
 
 class UrlBody(BaseModel):
@@ -1267,5 +1337,15 @@ app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 
 @app.get("/")
+def landing():
+    return FileResponse(str(FRONTEND_DIR / "landing.html"))
+
+
+@app.get("/auth")
+def auth_page():
+    return FileResponse(str(FRONTEND_DIR / "auth.html"))
+
+
+@app.get("/app")
 def index():
     return FileResponse(str(FRONTEND_DIR / "index.html"))

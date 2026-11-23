@@ -5,9 +5,10 @@ A working AI clipping workspace — paste a link (YouTube, Twitch, Kick, 1000+ s
 ## Quick start
 
 1. Double-click `start.bat` (or run the command below).
-2. Open **http://localhost:8000**.
-3. Paste a link in the command bar, or open **Agent** and say *“clip the funniest moments from this stream”*.
-4. Preview, download, or re-render with different settings.
+2. Open **http://localhost:8000** for the landing page.
+3. Choose **Login** or **Create account** on **/auth**, then use the dashboard at **/app**. All app APIs require a Supabase session.
+4. Paste a link in the command bar, or open **Agent** and say *“clip the funniest moments from this stream”*.
+5. Preview, download, or re-render with different settings.
 
 ```bash
 venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
@@ -35,6 +36,13 @@ First run downloads a ~75 MB Whisper model.
 - Stream-copy remux path when no reframing/captions are needed.
 - Cooperative cancel, per-clip retry with fresh HLS URL, and fresh-URL retry on failed section downloads.
 - AI timeout is short by default (`AI_TIMEOUT=20`) with fast models first, so a stalled free provider cannot freeze a job.
+
+### Accounts + public site
+- **`/`** modern landing page, **`/auth`** login/sign-up/password recovery, **`/app`** protected dashboard.
+- Supabase Auth email/password sessions; the anon/publishable key is the only key sent to the browser.
+- Create-account uses a rate-limited backend endpoint so it works even when public Supabase signups are disabled. The service-role key stays server-side.
+- “Remember this device” stores the session in local storage; otherwise it stays in session storage for the current tab.
+- Shared `?job=<id>` links work after sign-in and restore the clip grid.
 
 ### UI
 - Charcoal/near-black **NoetharaClipz v2** dashboard with your logo, compact sidebar, composer, session rail, clip cards, and editor shell.
@@ -95,7 +103,8 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 | `WHISPER_MODEL` | `tiny` (local default, fast) or `base` (slower, more accurate) |
 | `WHISPER_BEAM` | `1` (default) |
 | `SUPABASE_URL` | Project REST URL, e.g. `https://<ref>.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used for Storage uploads and metadata sync |
+| `SUPABASE_ANON_KEY` | Publishable key exposed to the browser for Supabase Auth |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only key used for Storage uploads, metadata sync, and account creation |
 | `SUPABASE_BUCKET` | Storage bucket for finished clips (`rendered-clips`) |
 | `SUPABASE_SIGNED_TTL` | `3600` seconds — lifetime of playback URLs |
 | `SUPABASE_TIMEOUT` | `120` seconds per upload |
