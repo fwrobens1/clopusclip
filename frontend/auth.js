@@ -7,25 +7,49 @@
   const switchBtn = $("#switchBtn");
   const title = $("#authTitle");
   const sub = $("#authSub");
+  const tabLogin = $("#tabLogin");
+  const tabSignup = $("#tabSignup");
+  const pwToggle = $("#pwToggle");
   const params = new URLSearchParams(location.search);
   let mode = params.get("mode") === "signup" ? "signup" : "login";
   let cfg = null;
 
   function show(text, kind) {
     msg.textContent = text;
-    msg.className = `pub-auth-msg show ${kind || "err"}`;
+    msg.className = `auth-msg show ${kind || "err"}`;
   }
-  function clear() { msg.className = "pub-auth-msg"; msg.textContent = ""; }
+  function clear() { msg.className = "auth-msg"; msg.textContent = ""; }
+
+  function setMode(next) {
+    mode = next;
+    const url = new URL(location.href);
+    if (mode === "signup") url.searchParams.set("mode", "signup");
+    else url.searchParams.delete("mode");
+    history.replaceState(null, "", url);
+    paintMode();
+  }
+
   function paintMode() {
     const up = mode === "signup";
-    title.textContent = up ? "Create your workspace." : "Welcome to NoetharaClipz.";
-    sub.textContent = up ? "Find the moments your audience wants to rewatch." : "Your studio is one sign-in away.";
-    submit.textContent = up ? "Create account" : "Login";
+    if (tabLogin) {
+      tabLogin.classList.toggle("active", !up);
+      tabLogin.setAttribute("aria-selected", String(!up));
+    }
+    if (tabSignup) {
+      tabSignup.classList.toggle("active", up);
+      tabSignup.setAttribute("aria-selected", String(up));
+    }
+    title.textContent = up ? "Create your studio." : "Welcome back.";
+    sub.textContent = up
+      ? "Start with a VOD. Leave with a queue of clips."
+      : "Sign in to open your clipping studio.";
+    submit.textContent = up ? "Create account" : "Sign in";
     switchBtn.textContent = up ? "Sign in instead" : "Create an account";
     document.title = up ? "Create account — NoetharaClipz" : "Sign in — NoetharaClipz";
     $("#password").autocomplete = up ? "new-password" : "current-password";
     clear();
   }
+
   function preferredStore() {
     const remember = $("#remember");
     return remember && !remember.checked ? sessionStorage : localStorage;
@@ -76,8 +100,22 @@
       return;
     }
     paintMode();
-    switchBtn.addEventListener("click", () => { mode = mode === "login" ? "signup" : "login"; paintMode(); });
-    $("#forgotLink").addEventListener("click", async (e) => {
+
+    if (tabLogin) tabLogin.addEventListener("click", () => setMode("login"));
+    if (tabSignup) tabSignup.addEventListener("click", () => setMode("signup"));
+    if (switchBtn) switchBtn.addEventListener("click", () => setMode(mode === "login" ? "signup" : "login"));
+
+    if (pwToggle) {
+      pwToggle.addEventListener("click", () => {
+        const visible = $("#password").type === "text";
+        $("#password").type = visible ? "password" : "text";
+        pwToggle.setAttribute("aria-pressed", String(!visible));
+        pwToggle.setAttribute("aria-label", visible ? "Show password" : "Hide password");
+      });
+    }
+
+    const forgot = $("#forgotLink");
+    if (forgot) forgot.addEventListener("click", async (e) => {
       e.preventDefault();
       const email = $("#email").value.trim();
       if (!email) { show("Enter your email first.", "err"); return; }
@@ -85,6 +123,12 @@
         await api("/auth/v1/recover", { email });
         show("Password reset email sent. Check your inbox.", "ok");
       } catch (err) { show(err.message, "err"); }
+    });
+
+    const video = $(".av-phone video");
+    if (video) document.addEventListener("visibilitychange", () => {
+      if (document.hidden) video.pause();
+      else video.play().catch(() => {});
     });
 
     const existingToken = localStorage.getItem("nc_access_token") || sessionStorage.getItem("nc_access_token");
@@ -102,8 +146,10 @@
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       clear();
+      if (!$("#email").value.trim()) { show("Enter your email address.", "err"); return; }
+      if ($("#password").value.length < 6) { show("Password needs at least 6 characters.", "err"); return; }
       submit.disabled = true;
-      submit.textContent = "Please wait…";
+      submit.textContent = mode === "signup" ? "Creating…" : "Signing in…";
       const email = $("#email").value.trim();
       const password = $("#password").value;
       try {
@@ -127,7 +173,7 @@
         show(err.message, "err");
       } finally {
         submit.disabled = false;
-        submit.textContent = mode === "signup" ? "Create account" : "Login";
+        submit.textContent = mode === "signup" ? "Create account" : "Sign in";
       }
     });
   }

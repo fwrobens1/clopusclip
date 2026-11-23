@@ -4,44 +4,395 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="color-scheme" content="dark" />
-<meta name="theme-color" content="#08090a" />
+<meta name="theme-color" content="#070808" />
 <title>Sign in — NoetharaClipz</title>
+<meta name="description" content="Sign in to NoetharaClipz and open your clipping studio." />
 <link rel="icon" type="image/png" href="/static/logo64.png" />
-<link rel="stylesheet" href="/static/public.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&display=swap" rel="stylesheet"></noscript>
+<style>
+:root{
+  --bg:#070808;
+  --surface:#0B0D0D;
+  --surface-2:#101313;
+  --surface-3:#151818;
+  --line:#1D2222;
+  --line-2:#293030;
+  --line-3:#394242;
+  --text:#F3F1EC;
+  --muted:#A5ABA7;
+  --dim:#707975;
+  --dim-2:#505956;
+  --blue:#4C93FF;
+  --blue-hi:#87B7FF;
+  --blue-deep:#2E72E8;
+  --blue-ink:#04101F;
+  --blue-soft:rgba(76,147,255,.10);
+  --blue-line:rgba(76,147,255,.26);
+  --green:#68D3A2;
+  --red:#E0716A;
+  --sans:"Geist",Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --ease:cubic-bezier(.22,1,.36,1);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;letter-spacing:-.008em;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:radial-gradient(850px 500px at 43% 16%,rgba(76,147,255,.07),transparent 68%)}
+body::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.018;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E")}
+::selection{background:rgba(76,147,255,.28);color:#fff}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+button,input{font:inherit}
+img,video{display:block;max-width:100%}
+h1,h2,p{margin:0}
+:focus-visible{outline:2px solid rgba(76,147,255,.62);outline-offset:3px}
+
+.auth-body{position:relative;z-index:1;display:flex;flex-direction:column}
+.skip{position:absolute;top:-60px;left:16px;z-index:100;background:var(--blue);color:var(--blue-ink);padding:8px 12px;border-radius:6px;font-size:12px;transition:top .2s}
+.skip:focus{top:12px}
+.auth-top{height:64px;border-bottom:1px solid transparent;display:flex;align-items:center;flex:none}
+.auth-top-inner{width:min(1240px,calc(100% - 64px));margin:0 auto;display:flex;align-items:center;gap:16px}
+.brand{display:inline-flex;align-items:center;gap:9px;color:var(--text);font-size:14px;font-weight:600;letter-spacing:-.025em}
+.brand img{width:27px;height:27px;border-radius:7px;object-fit:contain}
+.brand .v{font:500 8px/1 var(--mono);letter-spacing:.08em;color:var(--dim);border:1px solid var(--line-2);border-radius:4px;padding:2px 4px;margin-left:1px}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:20px}
+.top-context{font:400 9px/1 var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--dim)}
+.back-link{display:inline-flex;align-items:center;gap:7px;font-size:11px;color:var(--muted);transition:color .16s}
+.back-link:hover{color:var(--text)}
+.back-link svg{width:12px;height:12px}
+
+.auth-main{flex:1;display:flex;align-items:center;justify-content:center;padding:22px 32px 44px}
+.auth-shell{width:min(1240px,100%);min-height:720px;display:grid;grid-template-columns:1.08fr .92fr;border:1px solid var(--line-2);border-radius:22px;overflow:hidden;background:var(--surface);box-shadow:0 40px 120px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.015) inset;position:relative}
+.auth-shell::before{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(76,147,255,.5),transparent);z-index:5;pointer-events:none}
+
+/* visual side */
+.auth-visual{position:relative;min-width:0;overflow:hidden;padding:38px 40px 26px;display:flex;flex-direction:column;background:
+  radial-gradient(540px 380px at 14% 12%,rgba(76,147,255,.16),transparent 70%),
+  radial-gradient(420px 280px at 100% 100%,rgba(76,147,255,.07),transparent 72%),
+  linear-gradient(140deg,#0D1113 0%,#090B0C 52%,#0B1012 100%)}
+.auth-visual::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.8;background-image:linear-gradient(rgba(255,255,255,.034) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.034) 1px,transparent 1px);background-size:44px 44px;mask-image:linear-gradient(180deg,rgba(0,0,0,.6),transparent 78%);-webkit-mask-image:linear-gradient(180deg,rgba(0,0,0,.6),transparent 78%)}
+.auth-visual::after{content:"";position:absolute;left:-160px;top:-170px;width:430px;height:430px;border-radius:50%;border:1px solid rgba(76,147,255,.12);box-shadow:0 0 0 70px rgba(76,147,255,.025),0 0 0 140px rgba(76,147,255,.014);pointer-events:none}
+.av-copy{position:relative;z-index:2;max-width:500px}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font:500 9.5px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.eyebrow .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);box-shadow:0 0 0 4px rgba(76,147,255,.12),0 0 16px rgba(76,147,255,.46);flex:none}
+.auth-visual h1{margin-top:20px;font-size:clamp(42px,3.9vw,54px);line-height:.97;letter-spacing:-.055em;font-weight:500;max-width:500px}
+.auth-visual h1 .quiet{color:#C8CDC8}
+.auth-visual .av-lede{margin-top:18px;max-width:420px;color:var(--muted);font-size:13px;line-height:1.63}
+.av-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:18px}
+.av-chips span{display:inline-flex;align-items:center;gap:6px;font:400 7.5px/1 var(--mono);letter-spacing:.03em;color:var(--muted);border:1px solid var(--line-2);background:rgba(255,255,255,.018);border-radius:4px;padding:4px 6px}
+.av-chips span i{width:3px;height:3px;border-radius:50%;background:var(--blue)}
+.av-metrics{display:flex;gap:0;margin-top:20px;border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);max-width:350px}
+.av-metric{padding:11px 18px 11px 0;margin-right:18px;border-right:1px solid rgba(255,255,255,.08)}
+.av-metric:last-child{border-right:0;margin-right:0}
+.av-metric b{display:block;font:500 20px/1 var(--mono);letter-spacing:-.05em}
+.av-metric span{display:block;margin-top:4px;font:400 7px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+
+.av-stage{position:relative;z-index:2;width:340px;height:300px;flex:none;align-self:flex-end;margin-top:auto;perspective:1100px}
+.av-halo{position:absolute;inset:6% -4% 2% 0;background:radial-gradient(closest-side,rgba(76,147,255,.16),transparent 68%);filter:blur(10px)}
+.av-ghost{position:absolute;width:100px;height:178px;border:1px solid rgba(255,255,255,.13);border-radius:12px;overflow:hidden;background:#070909;opacity:.34;filter:saturate(.65) brightness(.75)}
+.av-ghost img{width:100%;height:100%;object-fit:cover}
+.av-ghost.a{left:3px;top:99px;transform:rotate(-8deg)}
+.av-ghost.b{right:3px;top:72px;transform:rotate(7deg)}
+.av-phone{position:absolute;left:50%;top:0;transform:translateX(-50%);width:154px;height:274px;padding:4px;border-radius:16px;background:#0B0F0F;border:1px solid #354040;box-shadow:0 28px 60px rgba(0,0,0,.65),0 0 0 1px rgba(255,255,255,.03) inset,0 0 38px rgba(76,147,255,.08);z-index:3}
+.av-screen{position:relative;width:100%;height:100%;overflow:hidden;border-radius:12px;background:#050606}
+.av-screen .poster,.av-screen video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.av-screen video{z-index:1}
+.av-screen::after{content:"";position:absolute;inset:0;z-index:2;background:linear-gradient(180deg,rgba(0,0,0,.32),transparent 28%,transparent 52%,rgba(0,0,0,.8))}
+.av-top{position:absolute;z-index:3;top:7px;left:7px;right:7px;display:flex;align-items:center;justify-content:space-between;font:500 6.5px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:rgba(255,255,255,.7)}
+.av-top .live{display:flex;align-items:center;gap:4px}
+.av-top .live i{width:4px;height:4px;border-radius:50%;background:var(--green)}
+.av-cap{position:absolute;z-index:3;left:8px;right:8px;bottom:27px;font-size:12px;line-height:1.08;font-weight:600;letter-spacing:-.03em;text-shadow:0 2px 9px rgba(0,0,0,.6)}
+.av-cap b{background:var(--blue);color:var(--blue-ink);padding:0 3px;border-radius:2px;text-shadow:none}
+.av-track{position:absolute;z-index:3;left:8px;right:8px;bottom:11px;height:2px;border-radius:2px;background:rgba(255,255,255,.2);overflow:hidden}
+.av-track i{display:block;width:62%;height:100%;background:var(--blue)}
+.av-time{position:absolute;z-index:3;left:8px;right:8px;bottom:15px;display:flex;justify-content:space-between;font:400 6px/1 var(--mono);color:rgba(255,255,255,.6)}
+.av-float{position:absolute;z-index:4;background:rgba(10,13,13,.86);border:1px solid var(--line-2);border-radius:8px;padding:8px 9px;backdrop-filter:blur(14px);box-shadow:0 16px 38px rgba(0,0,0,.4)}
+.av-float .k{font:500 6px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);display:block;margin-bottom:4px}
+.av-float .v{display:flex;align-items:baseline;gap:5px}
+.av-float b{font:500 20px/1 var(--mono);letter-spacing:-.06em}
+.av-float span{font:400 6.5px/1 var(--mono);color:var(--blue-hi)}
+.av-float.moment{left:0;top:42px;width:116px}
+.av-float.kept{right:0;bottom:26px;width:104px}
+.av-float.kept .v{justify-content:space-between}
+.av-float.kept b{font-size:14px}
+.av-float.kept span{color:var(--dim);font-size:6px}
+.av-recent{position:absolute;z-index:2;left:40px;bottom:118px;width:216px;border-left:1px solid var(--blue-line);padding-left:12px}
+.av-recent .k{display:block;font:500 6px/1 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
+.av-recent b{display:block;font-size:11px;font-weight:500;letter-spacing:-.015em;color:var(--text)}
+.av-recent small{display:block;margin-top:4px;font:400 6.5px/1.4 var(--mono);color:var(--dim)}
+.av-quote{position:absolute;z-index:2;left:40px;bottom:76px;max-width:205px;color:rgba(255,255,255,.34);font-size:11px;line-height:1.5;letter-spacing:-.005em}
+.av-quote b{color:rgba(255,255,255,.65);font-weight:400}
+.av-footer{margin-top:18px;position:relative;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:15px;border-top:1px solid rgba(255,255,255,.08);padding-top:13px;font:400 7px/1.4 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim)}
+.av-footer span:last-child{color:var(--muted)}
+
+/* form side */
+.auth-panel{background:#0B0D0D;border-left:1px solid var(--line);display:flex;align-items:center;justify-content:center;padding:40px;position:relative}
+.auth-panel::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(300px 250px at 80% 12%,rgba(76,147,255,.035),transparent 70%)}
+.auth-form-wrap{position:relative;z-index:1;width:min(360px,100%)}
+.mobile-brand{display:none;align-items:center;gap:8px;margin-bottom:25px;font-size:13px;font-weight:600;letter-spacing:-.02em}
+.mobile-brand img{width:24px;height:24px;border-radius:6px}
+.auth-tabs{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--line);background:#090B0B;border-radius:8px;margin-bottom:24px}
+.auth-tab{flex:1;height:31px;border-radius:5px;color:var(--dim);font-size:11px;font-weight:500;transition:background .18s,color .18s,border-color .18s}
+.auth-tab:hover{color:var(--text)}
+.auth-tab.active{background:#151B22;border:1px solid #2A3542;color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+.auth-form-wrap h2{font-size:29px;line-height:1.05;letter-spacing:-.045em;font-weight:500}
+.auth-form-wrap .sub{margin-top:8px;color:var(--dim);font-size:11.5px;line-height:1.55;max-width:310px}
+.auth-form{margin-top:24px}
+.field{margin-bottom:12px}
+.label-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+.field label,.field .label-row label{display:block;font:500 9px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.field .label-row a{font:400 9px/1 var(--mono);color:var(--dim);transition:color .16s}
+.field .label-row a:hover{color:var(--blue-hi)}
+.input-wrap{position:relative;display:flex;align-items:center}
+.input-wrap>svg{position:absolute;left:12px;width:14px;height:14px;color:var(--dim);pointer-events:none;z-index:1}
+.input-wrap input{width:100%;height:43px;border:1px solid #252D2D;border-radius:7px;background:#080A0A;color:var(--text);padding:0 12px 0 36px;font-size:12.5px;outline:none;transition:border-color .16s,background .16s,box-shadow .16s;-webkit-appearance:none}
+.input-wrap input::placeholder{color:#4E5754}
+.input-wrap input:hover{border-color:#303A39}
+.input-wrap input:focus{border-color:rgba(76,147,255,.65);background:#090C0D;box-shadow:0 0 0 3px rgba(76,147,255,.09)}
+.input-wrap input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px #080A0A inset;-webkit-text-fill-color:var(--text)}
+.pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:30px;height:30px;display:grid;place-items:center;color:var(--dim);border-radius:4px;z-index:2}
+.pw-toggle:hover{color:var(--text);background:rgba(255,255,255,.04)}
+.pw-toggle svg{width:14px;height:14px}
+.remember{display:flex;align-items:center;gap:7px;margin:15px 0 17px;color:var(--dim);font-size:10.5px;cursor:pointer;user-select:none;width:fit-content}
+.remember input{position:absolute;opacity:0;width:1px;height:1px}
+.remember .box{width:13px;height:13px;border:1px solid #394241;border-radius:3px;background:#080A0A;display:grid;place-items:center;flex:none;transition:background .15s,border-color .15s}
+.remember .box svg{width:8px;height:8px;color:var(--blue-ink);opacity:0}
+.remember input:checked+.box{background:var(--blue);border-color:var(--blue)}
+.remember input:checked+.box svg{opacity:1}
+.remember input:focus-visible+.box{outline:2px solid rgba(76,147,255,.55);outline-offset:2px}
+.auth-actions{display:grid;gap:8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:1px solid transparent;border-radius:7px;font-size:12px;font-weight:500;letter-spacing:-.01em;transition:background .18s,border-color .18s,color .18s,transform .18s,box-shadow .18s}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:none}
+.btn-primary{height:43px;background:var(--blue);color:var(--blue-ink);box-shadow:inset 0 1px 0 rgba(255,255,255,.24),0 7px 20px rgba(76,147,255,.14)}
+.btn-primary:hover{background:#6FA9FF;box-shadow:inset 0 1px 0 rgba(255,255,255,.3),0 9px 25px rgba(76,147,255,.2)}
+.btn-primary:disabled{opacity:.6;cursor:wait;transform:none}
+.btn-ghost{height:41px;border-color:var(--line-2);background:rgba(255,255,255,.015);color:var(--muted)}
+.btn-ghost:hover{border-color:var(--line-3);background:var(--surface-3);color:var(--text)}
+.auth-msg{display:none;margin-top:13px;padding:9px 10px;border-radius:6px;font-size:10.5px;line-height:1.45;border:1px solid transparent}
+.auth-msg.show{display:block}
+.auth-msg.err{background:rgba(224,113,106,.07);border-color:rgba(224,113,106,.26);color:#E4A19C}
+.auth-msg.ok{background:rgba(104,211,162,.06);border-color:rgba(104,211,162,.23);color:#A5E3C7}
+.auth-legal{margin-top:18px;color:var(--dim-2);font-size:9px;line-height:1.55;text-align:center}
+.auth-legal a{color:var(--dim);border-bottom:1px solid #303837;padding-bottom:1px}
+.auth-legal a:hover{color:var(--text)}
+.auth-assurance{display:flex;align-items:center;justify-content:center;gap:5px;flex-wrap:wrap;margin-top:21px;padding-top:14px;border-top:1px solid var(--line)}
+.auth-assurance span{display:inline-flex;align-items:center;gap:4px;font:400 6.5px/1 var(--mono);letter-spacing:.04em;color:var(--dim);border:1px solid var(--line);border-radius:3px;padding:4px 5px}
+.auth-assurance svg{width:8px;height:8px;color:var(--green)}
+.preview-note{display:none;margin-top:10px;text-align:center;font:400 6.5px/1.4 var(--mono);color:var(--dim-2)}
+.preview-note.show{display:block}
+.auth-footer{flex:none;padding:0 0 20px;text-align:center;color:var(--dim-2);font:400 7px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.auth-footer a{color:var(--dim);border-bottom:1px solid #2C3433}
+
+@media(max-width:1100px){
+  .auth-visual{padding:34px 32px 24px}
+  .av-stage{width:310px;height:285px}
+  .av-quote{left:32px;max-width:180px}
+  .auth-panel{padding:32px}
+}
+@media(max-width:900px){
+  .auth-top-inner{width:calc(100% - 40px)}
+  .auth-main{padding:16px 20px 32px;align-items:flex-start}
+  .auth-shell{grid-template-columns:1fr;min-height:0;max-width:720px;margin:0 auto}
+  .auth-visual{min-height:294px;padding:28px 28px 20px}
+  .auth-visual h1{font-size:clamp(38px,7vw,50px);max-width:440px}
+  .auth-visual .av-lede{max-width:370px;font-size:12.5px;margin-top:14px}
+  .av-chips{margin-top:17px}
+  .av-metrics{margin-top:18px;max-width:330px}
+  .av-stage{display:none}
+  .av-recent{display:none}
+  .av-quote{display:none}
+  .auth-panel{border-left:0;border-top:1px solid var(--line);padding:30px 24px 32px}
+  .auth-form-wrap{width:min(400px,100%)}
+  .auth-tabs{margin-bottom:20px}
+  .auth-form-wrap h2{font-size:27px}
+  .av-footer{position:static;margin-top:16px}
+}
+@media(max-width:560px){
+  .auth-top{height:58px}
+  .auth-top-inner{width:calc(100% - 32px)}
+  .brand{font-size:13px}
+  .brand img{width:25px;height:25px}
+  .top-context{display:none}
+  .back-link{font-size:10px}
+  .auth-main{padding:10px 10px 22px}
+  .auth-shell{border-radius:16px}
+  .auth-visual{min-height:262px;padding:23px 20px 17px}
+  .auth-visual h1{font-size:clamp(36px,10.5vw,44px);margin-top:14px}
+  .auth-visual .av-lede{font-size:11.5px;line-height:1.55;max-width:310px}
+  .av-chips{gap:4px;margin-top:14px}
+  .av-chips span{font-size:6.5px;padding:4px 5px}
+  .av-metrics{margin-top:15px;max-width:none}
+  .av-metric{padding:9px 13px 9px 0;margin-right:13px}
+  .av-metric b{font-size:16px}
+  .av-metric span{font-size:6px}
+  .av-footer{font-size:6px;gap:8px;padding-top:10px;margin-top:14px}
+  .auth-panel{padding:25px 17px 27px}
+  .auth-tab{height:29px;font-size:10px}
+  .auth-form-wrap h2{font-size:26px}
+  .auth-form-wrap .sub{font-size:10.5px}
+  .auth-form{margin-top:20px}
+  .input-wrap input{height:42px;font-size:12px}
+  .auth-legal{font-size:8px}
+  .auth-assurance{margin-top:17px;padding-top:12px}
+  .auth-footer{font-size:6px;padding-bottom:14px}
+}
+@media(prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{transition-duration:.001ms!important;animation-duration:.001ms!important}
+  video{display:none}
+}
+</style>
+
+<style>
+/* ---- smooth motion layer ---- */
+@keyframes nc-rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes nc-bob{0%,100%{translate:0 0}50%{translate:0 -8px}}
+@keyframes nc-pulse{0%,100%{opacity:.7;scale:1}50%{opacity:1;scale:1.07}}
+@keyframes nc-drift{0%,100%{translate:0 0;rotate:0deg}50%{translate:0 -14px;rotate:1.5deg}}
+.auth-form-wrap>*{animation:nc-rise .72s var(--ease) both}
+.auth-form-wrap>*:nth-child(1){animation-delay:.05s}
+.auth-form-wrap>*:nth-child(2){animation-delay:.12s}
+.auth-form-wrap>*:nth-child(3){animation-delay:.19s}
+.auth-form-wrap>*:nth-child(4){animation-delay:.26s}
+.auth-form-wrap>*:nth-child(5){animation-delay:.33s}
+.av-phone{animation:nc-drift 7s ease-in-out infinite}
+.av-halo,body::before{animation:nc-pulse 8s ease-in-out infinite}
+.av-float{animation:nc-bob 6.5s ease-in-out infinite}
+.av-float.kept{animation-delay:1.2s}
+.av-ghost{animation:nc-drift 9s ease-in-out infinite reverse}
+.av-ghost.b{animation-delay:2s}
+@media(prefers-reduced-motion:reduce){
+  .auth-form-wrap>*,.av-phone,.av-halo,body::before,.av-float,.av-ghost{animation:none!important}
+}
+</style>
 </head>
-<body class="pub">
-<main class="pub-auth-shell">
-  <div class="pub-auth-panel">
-    <section class="pub-auth-card">
-      <div class="pub-auth-logo"><img src="/static/logo64.png" alt="NoetharaClipz" /></div>
-      <h1 id="authTitle">Welcome to NoetharaClipz.</h1>
-      <p class="sub" id="authSub">Your studio is one sign-in away.</p>
+<body class="auth-body">
+<a class="skip" href="#authForm">Skip to sign in</a>
+<header class="auth-top">
+  <div class="auth-top-inner">
+    <a class="brand" href="/" aria-label="NoetharaClipz home">
+      <img src="/static/logo128.png" alt="" />
+      <span>NoetharaClipz</span><span class="v">V2</span>
+    </a>
+    <div class="top-right">
+      <span class="top-context">Studio access</span>
+      <a class="back-link" href="/">Back to site
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13 8H3m4.5-4.5L3 8l4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
 
-      <form id="authForm" autocomplete="on">
-        <div class="pub-field">
-          <label for="email">Email address</label>
-          <input id="email" name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+<main class="auth-main">
+  <div class="auth-shell">
+    <section class="auth-visual" aria-label="NoetharaClipz studio">
+      <div class="av-copy">
+        <div class="eyebrow"><span class="dot"></span>Studio access</div>
+        <h1>Welcome back<br /><span class="quiet">to the cut.</span></h1>
+        <p class="av-lede">Your runs, presets and publish queue are waiting. Sign in to pick up the clips you left in review.</p>
+        <div class="av-chips">
+          <span><i></i>Local render</span>
+          <span><i></i>Word-level captions</span>
+          <span><i></i>Review before render</span>
         </div>
-        <div class="pub-field">
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" placeholder="••••••••" autocomplete="current-password" required minlength="6" />
+        <div class="av-metrics">
+          <div class="av-metric"><b>12</b><span>moments found</span></div>
+          <div class="av-metric"><b>05</b><span>kept</span></div>
+          <div class="av-metric"><b>4m</b><span>render</span></div>
         </div>
-        <div class="pub-field-row">
-          <label><input id="remember" type="checkbox" checked style="accent-color:var(--pv-acid)" /> Remember this device</label>
-          <a href="#" id="forgotLink">Forgot password?</a>
-        </div>
-        <div class="pub-auth-actions">
-          <button class="pub-btn pub-btn-acid" id="submitBtn" type="submit">Login</button>
-          <button class="pub-btn pub-btn-ghost" id="switchBtn" type="button">Create an account</button>
-        </div>
-      </form>
+      </div>
 
-      <div class="pub-auth-msg" id="authMsg" role="status" aria-live="polite"></div>
-      <div class="pub-auth-switch">By continuing you agree to the <a href="#">Terms</a> and <a href="#">Privacy Policy</a>.</div>
+      <div class="av-stage" aria-label="Clip preview">
+        <div class="av-halo" aria-hidden="true"></div>
+        <div class="av-ghost a" aria-hidden="true"><img src="/static/media/hero-18.jpg" alt="" /></div>
+        <div class="av-ghost b" aria-hidden="true"><img src="/static/media/hero-24.jpg" alt="" /></div>
+        <div class="av-phone">
+          <div class="av-screen">
+            <img class="poster" src="/static/media/hero-6.jpg" alt="" />
+            <video autoplay muted loop playsinline preload="metadata" poster="/static/media/hero-6.jpg" aria-label="Vertical clip preview">
+              <source src="/static/media/clip-demo.mp4" type="video/mp4" />
+            </video>
+            <div class="av-top"><span class="live"><i></i>Preview</span><span>9:16</span></div>
+            <div class="av-cap">You know me,<br /><b>I like the light.</b></div>
+            <div class="av-time"><span>00:18</span><span>00:29</span></div>
+            <div class="av-track"><i></i></div>
+          </div>
+        </div>
+        <div class="av-float moment">
+          <span class="k">Moment found</span>
+          <div class="v"><b>92</b><span>payoff</span></div>
+        </div>
+        <div class="av-float kept">
+          <span class="k">This run</span>
+          <div class="v"><b>12</b><span>found</span></div>
+        </div>
+      </div>
+
+      <div class="av-recent"><span class="k">Last run</span><b>NickEh30 · GTA 6</b><small>07:38:12 · 12 moments · 5 kept</small></div>
+      <p class="av-quote">The clip was already in the VOD. <b>You just needed to find it.</b></p>
+      <div class="av-footer"><span>NOCTX / 2026</span><span>7H 38M VOD → 5 CLIPS</span></div>
+    </section>
+
+    <section class="auth-panel">
+      <div class="auth-form-wrap">
+        <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+          <button class="auth-tab active" id="tabLogin" type="button" role="tab" aria-selected="true">Sign in</button>
+          <button class="auth-tab" id="tabSignup" type="button" role="tab" aria-selected="false">Create account</button>
+        </div>
+
+        <h2 id="authTitle">Welcome back.</h2>
+        <p class="sub" id="authSub">Sign in to open your clipping studio.</p>
+
+        <form class="auth-form" id="authForm" novalidate>
+          <div class="field">
+            <div class="label-row"><label for="email">Email address</label></div>
+            <div class="input-wrap">
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.8" y="3.5" width="12.4" height="9" rx="1.6" stroke="currentColor" stroke-width="1.2"/><path d="m2.5 4.5 5.5 4 5.5-4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <input id="email" name="email" type="email" placeholder="you@studio.com" autocomplete="email" inputmode="email" required />
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="label-row"><label for="password">Password</label><a href="#" id="forgotLink">Forgot?</a></div>
+            <div class="input-wrap">
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1.8" stroke="currentColor" stroke-width="1.2"/><path d="M5.2 7V5.4a2.8 2.8 0 0 1 5.6 0V7" stroke="currentColor" stroke-width="1.2"/></svg>
+              <input id="password" name="password" type="password" placeholder="••••••••" autocomplete="current-password" minlength="6" required />
+              <button class="pw-toggle" id="pwToggle" type="button" aria-label="Show password" aria-pressed="false">
+                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M1.8 8s2.1-3.6 6.2-3.6S14.2 8 14.2 8s-2.1 3.6-6.2 3.6S1.8 8 1.8 8Z" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.6" stroke="currentColor" stroke-width="1.2"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <label class="remember">
+            <input id="remember" type="checkbox" checked />
+            <span class="box"><svg viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="m1.5 5 2.2 2.2L8.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <span>Remember this device</span>
+          </label>
+
+          <div class="auth-actions">
+            <button class="btn btn-primary" id="submitBtn" type="submit">Sign in</button>
+            <button class="btn btn-ghost" id="switchBtn" type="button">Create an account</button>
+          </div>
+          <div class="auth-msg" id="authMsg" role="status" aria-live="polite"></div>
+          <div class="auth-legal">By continuing you agree to the <a href="#">Terms</a> and <a href="#">Privacy Policy</a>.</div>
+        </form>
+
+        <div class="auth-assurance">
+          <span><svg viewBox="0 0 12 12" fill="none"><path d="m2 6 2.2 2.2L10 2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>Local-first</span>
+          <span><svg viewBox="0 0 12 12" fill="none"><path d="m2 6 2.2 2.2L10 2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>No credit card</span>
+          <span><svg viewBox="0 0 12 12" fill="none"><path d="m2 6 2.2 2.2L10 2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>Session on this device</span>
+        </div>
+      </div>
     </section>
   </div>
-  <div class="pub-auth-foot">NOCTX · Built for clips people actually watch.</div>
 </main>
+
+<footer class="auth-footer">NOCTX · BUILT FOR CLIPS PEOPLE ACTUALLY WATCH · <a href="/">BACK TO SITE</a></footer>
+
 <script src="/static/auth.js"></script>
 </body>
 </html>
