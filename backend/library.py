@@ -13,6 +13,8 @@ LIB_DIR.mkdir(parents=True, exist_ok=True)
 LIBRARY_PATH = LIB_DIR / "library.json"
 PRESET_PATH = LIB_DIR / "crop_presets.json"
 PUBLISH_PATH = LIB_DIR / "publish_queue.json"
+LIVE_PATH = LIB_DIR / "live_sessions.json"
+PUBLICATIONS_PATH = LIB_DIR / "publications.json"
 DICT_PATH = ROOT / "work" / "caption_dictionary.json"
 
 
@@ -158,6 +160,24 @@ def load_publish_queue() -> list[dict]:
 
 def save_publish_queue(items: list[dict]) -> list[dict]:
     _save(PUBLISH_PATH, items)
+    return items
+
+
+def load_live_sessions() -> dict[str, dict]:
+    return _load(LIVE_PATH, {})
+
+
+def save_live_sessions(items: dict[str, dict]) -> dict[str, dict]:
+    _save(LIVE_PATH, items)
+    return items
+
+
+def load_publications() -> list[dict]:
+    return _load(PUBLICATIONS_PATH, [])
+
+
+def save_publications(items: list[dict]) -> list[dict]:
+    _save(PUBLICATIONS_PATH, items)
     return items
 
 

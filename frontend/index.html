@@ -108,6 +108,9 @@
       <button class="nav-item" data-view="clips" aria-label="Clips" title="Clips">
         <svg class="ico" aria-hidden="true"><use href="#i-film"/></svg><span>Clips</span><span class="nav-count">0</span>
       </button>
+      <button class="nav-item" data-view="live" aria-label="Live" title="Live">
+        <svg class="ico" aria-hidden="true"><use href="#i-spark"/></svg><span>Live</span><span class="nav-badge" id="navLiveCount">0</span>
+      </button>
       <button class="nav-item" data-view="library" aria-label="Library" title="Library">
         <svg class="ico" aria-hidden="true"><use href="#i-folder"/></svg><span>Library</span><span class="nav-badge" id="navLibraryCount">0</span>
       </button>
@@ -460,7 +463,7 @@
                 <div class="pb-tools">
                   <button data-toast="Attach a video file" aria-label="Attach file"><svg class="ico" aria-hidden="true"><use href="#i-plus"/></svg></button>
                   <button data-toast="Mention a source" aria-label="Mention source"><svg class="ico" aria-hidden="true"><use href="#i-at"/></svg></button>
-                  <button data-toast="Commands: /clip /brief /rerender" aria-label="Commands"><svg class="ico" aria-hidden="true"><use href="#i-slash"/></svg></button>
+                  <button data-toast="Tools: tools · live status · start live · stop live" aria-label="Tools"><svg class="ico" aria-hidden="true"><use href="#i-slash"/></svg></button>
                   <button class="chip chip-xs" id="agentCaptions" style="margin-left:4px"><svg class="ico" aria-hidden="true"><use href="#i-cap"/></svg>Captions on</button>
                 </div>
                 <div class="pb-right">
@@ -474,6 +477,9 @@
               <button class="suggest" data-fill="Make 3 shorts with no captions">3 shorts, no captions</button>
               <button class="suggest" data-fill="Re-render the last job in 9:16">re-render 9:16</button>
               <button class="suggest" data-fill="Summarise what happened in this stream">summarise stream</button>
+              <button class="suggest" data-fill="tools">list agent tools</button>
+              <button class="suggest" data-fill="live status">live status</button>
+              <button class="suggest" data-fill="start live https://www.twitch.tv/username">start live</button>
             </div>
             <div class="page-foot"><svg class="ico" aria-hidden="true"><use href="#i-lock"/></svg>Agent runs on this machine · source captions preferred</div>
           </div>
@@ -530,6 +536,11 @@
               <button class="btn btn-ghost btn-sm" id="closePublish">Close</button>
             </div>
             <div id="publishList" class="publish-list"></div>
+            <div class="schedule-bar">
+              <label><span class="insp-label">Schedule approved posts</span><input class="inp" id="publishScheduleAt" type="datetime-local" aria-label="Schedule time" /></label>
+              <button class="btn btn-secondary btn-sm" id="schedulePublish"><svg class="ico" aria-hidden="true"><use href="#i-send"/></svg>Approve + schedule</button>
+            </div>
+            <div id="scheduleList" class="schedule-list"></div>
             <div class="publish-foot">
               <button class="btn btn-secondary btn-sm" id="savePublish">Save queue</button>
               <button class="btn btn-primary btn-sm" id="copyPublish"><svg class="ico" aria-hidden="true"><use href="#i-file"/></svg>Copy post package</button>
@@ -569,6 +580,35 @@
         </div>
       </section>
 
+      <!-- ================= LIVE ================= -->
+      <section class="page" id="page-live" hidden>
+        <div class="page-inner">
+          <div class="head-simple">
+            <div>
+              <div class="eyebrow"><span class="dot"></span>Workspace / Live</div>
+              <h1>Live clipping</h1>
+              <p>Start recording a live URL, then let rolling passes find reaction moments while the stream is still running. Nothing before you join can be recovered.</p>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="refreshLive"><svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg>Refresh</button>
+          </div>
+
+          <section class="rc live-start-card">
+            <div class="rail-title">Start a live session</div>
+            <p class="settings-note">First pass defaults to 15 minutes, then one pass every 30 minutes. Use a shorter first pass for testing.</p>
+            <label class="insp-label">Live URL</label>
+            <input class="inp" id="liveUrl" placeholder="https://www.twitch.tv/username" aria-label="Live URL" />
+            <div class="live-form-row">
+              <label><span class="insp-label">Creative brief</span><input class="inp" id="liveGoal" placeholder="funniest reactions, keep it punchy" /></label>
+              <label><span class="insp-label">First pass</span><select class="inp" id="liveFirstPass"><option value="900">15 minutes</option><option value="300">5 minutes</option><option value="60">1 minute (test)</option></select></label>
+              <label><span class="insp-label">Clips per pass</span><select class="inp" id="liveTarget"><option>3</option><option selected>5</option><option>8</option></select></label>
+            </div>
+            <button class="btn btn-primary btn-sm" id="liveStart"><svg class="ico" aria-hidden="true"><use href="#i-spark"/></svg>Start recording</button>
+          </section>
+
+          <div class="live-grid" id="liveSessions"></div>
+        </div>
+      </section>
+
 <!-- ================= EDITOR ================= -->
       <section class="page" id="page-editor" hidden>
         <div class="editor">
@@ -580,7 +620,7 @@
             </div>
             <div class="editor-actions">
               <span class="tag" id="editorState">Draft</span>
-              <button class="btn btn-secondary btn-sm" data-toast="Project saved">Save</button>
+              <button class="btn btn-secondary btn-sm" id="editorSave">Save</button>
               <button class="btn btn-primary btn-sm" data-toast="Export queued · 9:16 · captions">Export<svg class="ico" aria-hidden="true"><use href="#i-arrow"/></svg></button>
             </div>
           </div>
@@ -683,6 +723,10 @@
                     <div class="detail-row"><span>Range</span><b id="edRange">00:12–00:41</b></div>
                     <div class="detail-row"><span>Score</span><b id="edScore">94 / 100</b></div>
                     <div class="detail-row"><span>Rendered</span><b>local</b></div>
+                  </div>
+                  <div class="insp-section">
+                    <div class="insp-label">Tracks <span class="mono" id="trackCount">0</span></div>
+                    <div class="editor-tracks" id="editorTracks"></div>
                   </div>
                   <div class="insp-section">
                     <div class="insp-label">Hook variants</div>

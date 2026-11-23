@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -15,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dotenv import load_dotenv
+import requests
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,8 +48,9 @@ SUBS_DIR = ROOT / "work" / "subs"
 ASR_DIR = ROOT / "work" / "asr"
 LIB_DIR = ROOT / "work" / "library"
 TRANSCRIPT_DIR = ROOT / "work" / "transcripts"
+LIVE_DIR = ROOT / "work" / "live"
 FRONTEND_DIR = ROOT / "frontend"
-for d in (UPLOAD_DIR, AUDIO_DIR, CLIP_DIR, SECTION_DIR, SUBS_DIR, ASR_DIR, LIB_DIR, TRANSCRIPT_DIR):
+for d in (UPLOAD_DIR, AUDIO_DIR, CLIP_DIR, SECTION_DIR, SUBS_DIR, ASR_DIR, LIB_DIR, TRANSCRIPT_DIR, LIVE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="NoetharaClipz API")
@@ -75,7 +79,10 @@ async def require_supabase_user(request: Request, call_next):
 
 
 jobs: dict[str, dict] = {}
-RENDER_WORKERS = max(1, min(3, int(__import__("os").getenv("RENDER_WORKERS", "2"))))
+live_sessions: dict[str, dict] = {}
+publications: list[dict] = []
+LIVE_RECORDERS: dict[str, subprocess.Popen] = {}
+RENDER_WORKERS = max(1, min(3, int(os.getenv("RENDER_WORKERS", "2"))))
 
 
 def _now() -> str:
@@ -94,6 +101,7 @@ def _persist(job_id: str) -> None:
     job = jobs.get(job_id)
     if not job:
         return
+    _ensure_clip_extras(job)
     detail = {
         "id": job_id,
         "status": job.get("status", "queued"),
@@ -199,6 +207,18 @@ for _jid, _detail in library.load_job_details().items():
         if isinstance(_cached, dict) and _cached.get("segments"):
             jobs[_jid]["transcript"] = _cached["segments"]
 
+# Live recorders do not survive a process restart. Keep the session history but
+# mark any previously live session as stopped with an explicit reason.
+for _sid, _session in library.load_live_sessions().items():
+    if _session.get("state") == "live":
+        _session["state"] = "stopped"
+        _session["phase"] = "done"
+        _session["stop_reason"] = "server_restart"
+        _session["next_pass_at"] = None
+    live_sessions[_sid] = _session
+
+publications.extend(library.load_publications())
+
 
 def _cancelled(job_id: str) -> bool:
     return bool(jobs.get(job_id, {}).get("cancel_requested"))
@@ -238,6 +258,93 @@ def _make_hooks(job: dict, clips: list[dict]) -> list[dict]:
     except Exception:
         pass
     return [[c.get("title", "Watch this")[:90] for _ in range(3)] for c in clips]
+
+
+def _clip_excerpt(transcript: list[dict], start: float, end: float, limit: int = 360) -> str:
+    """Short transcript slice used to explain why a moment was selected."""
+    if not transcript or end <= start:
+        return ""
+    parts = []
+    for seg in transcript:
+        s, e = float(seg.get("start", 0)), float(seg.get("end", 0))
+        if e < start - 1 or s > end + 1:
+            continue
+        text = str(seg.get("text", "")).strip()
+        if text:
+            parts.append(text)
+        if sum(len(x) for x in parts) >= limit:
+            break
+    return " ".join(parts)[:limit]
+
+
+def _default_tracks(job: dict, clip: dict, index: int) -> list[dict]:
+    """Typed editor state: text + visual + caption tracks."""
+    start = float(clip.get("start", 0) or 0)
+    end = float(clip.get("end", start + 30) or start + 30)
+    duration = max(1.0, end - start)
+    hook = (clip.get("hooks") or [clip.get("title", "Watch this")])[int(clip.get("hook_index", 0) or 0)]
+    job_id = job.get("id", "")
+    return [
+        {
+            "kind": "text",
+            "clips": [{
+                "type": "text", "role": "hook", "text": str(hook)[:90],
+                "start": 0.0, "end": min(3.0, duration),
+                "style": {"font_variant": "bold", "case": "lower", "stroke": 2, "shadow": True},
+            }],
+        },
+        {
+            "kind": "visual",
+            "clips": [{
+                "type": "video", "media_id": f"{job_id}-{index}",
+                "src": f"/api/clips/{job_id}/{index}",
+                "src_start": start, "src_duration": duration,
+                "layouts": [job.get("settings", {}).get("layout", "split")],
+                "keyframes": [],
+                "captions": bool(job.get("settings", {}).get("captions", True)),
+                "volume": 1.0,
+            }],
+        },
+        {"kind": "caption", "clips": []},
+    ]
+
+
+def _default_config(job: dict, clip: dict) -> dict:
+    settings = job.get("settings", {})
+    return {
+        "aspect_ratio": 0.5625 if settings.get("vertical", True) else 16 / 9,
+        "safe_area": 48,
+        "reframe": {
+            "enabled": bool(settings.get("vertical", True)),
+            "layout": settings.get("layout", "split"),
+            "speaker_focus": True,
+            "allowed_layout_types": ["split", "full", "blur_pad", "facecam_bubble"],
+            "focus": clip.get("focus") or {"cx": 0.10, "cy": 0.30},
+        },
+        "captions": {
+            "enabled": bool(settings.get("captions", True)),
+            "max_chars": 15,
+            "max_lines": 2,
+            "highlight": {"mode": "word"},
+        },
+        "watermark": clip.get("watermark", "@NOCTX"),
+        "trim": {"silence_removal": False},
+    }
+
+
+def _ensure_clip_extras(job: dict) -> None:
+    """Backfill explainability + editor state on old and new clips."""
+    transcript = job.get("transcript") or []
+    for i, c in enumerate(job.get("clips") or []):
+        hooks = c.get("hooks") or [c.get("title", "Watch this")]
+        c.setdefault("score_reason", c.get("reason") or "Selected for its reaction payoff.")
+        c.setdefault("hook_title", hooks[int(c.get("hook_index", 0) or 0)] if hooks else c.get("title", "Watch this"))
+        c.setdefault("transcript_excerpt", _clip_excerpt(
+            transcript, float(c.get("start", 0)), float(c.get("end", 0))))
+        c.setdefault("tracks", _default_tracks(job, c, i))
+        c.setdefault("config", _default_config(job, c))
+        c.setdefault("source_start_seconds", c.get("start"))
+        c.setdefault("source_end_seconds", c.get("end"))
 
 
 def _source_signals(url: str, audio_path: Path | None) -> list[dict]:
@@ -381,6 +488,288 @@ def _section_for(job_id: str, url: str, start: float, end: float) -> Path:
     raise RuntimeError(f"Section fetch failed: {last}")
 
 
+def _local_section(video_path: str, start: float, end: float, out_path: Path) -> Path:
+    """Cut an accurate section from a local live recording."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    span = max(1.0, float(end) - float(start))
+    cmd = [
+        shutil.which("ffmpeg") or "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, float(start)):.3f}", "-i", video_path,
+        "-t", f"{span:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest", str(out_path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=float(os.getenv("RENDER_TIMEOUT", "480")))
+    if r.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 1000:
+        raise RuntimeError(f"Live section cut failed: {(r.stderr or '')[-300:]}")
+    return out_path
+
+
+def _live_cloud_row(session: dict) -> dict:
+    return {k: v for k, v in session.items() if not k.startswith("_")}
+
+
+def _persist_live(session_id: str) -> None:
+    session = live_sessions.get(session_id)
+    if not session:
+        return
+    data = library.load_live_sessions()
+    data[session_id] = session
+    library.save_live_sessions(data)
+    if cloud.enabled():
+        try:
+            cloud.save_live_session(_live_cloud_row(session))
+        except Exception as e:  # noqa: BLE001
+            print(f"[cloud] live session sync failed for {session_id}: {e}", flush=True)
+
+
+def _extract_live_audio(recording: str, start: float, end: float, wav_path: Path) -> Path:
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    span = max(1.0, float(end) - float(start))
+    cmd = [
+        shutil.which("ffmpeg") or "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, float(start)):.3f}", "-i", recording,
+        "-t", f"{span:.3f}", "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", str(wav_path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0 or not wav_path.exists() or wav_path.stat().st_size < 1000:
+        raise RuntimeError(f"Live audio extraction failed: {(r.stderr or '')[-300:]}")
+    return wav_path
+
+
+def _stop_live_recorder(session_id: str, reason: str) -> None:
+    proc = LIVE_RECORDERS.pop(session_id, None)
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    session = live_sessions.get(session_id)
+    if not session:
+        return
+    session["state"] = "ended" if reason == "source_ended" else "stopped"
+    session["phase"] = "done"
+    session["stop_reason"] = reason
+    session["next_pass_at"] = None
+    session["stop_requested"] = False
+    session["updated_at"] = _now()
+    _persist_live(session_id)
+
+
+def _run_live_pass(session_id: str) -> dict:
+    """Analyze the newest clipped window and append fresh moments to its job."""
+    session = live_sessions.get(session_id)
+    if not session or session.get("state") != "live":
+        return {"ok": False, "error": "Session is not live"}
+    job = jobs.get(session.get("job_id"))
+    if not job:
+        return {"ok": False, "error": "Live job not found"}
+
+    elapsed = max(0.0, time.time() - float(session.get("started_at_epoch") or time.time()))
+    clip_from = float(session.get("clipped_until_seconds") or 0)
+    clip_to = min(elapsed - 1.0, clip_from + float(session.get("pass_window_seconds") or 1800))
+    if clip_to - clip_from < 45:
+        return {"ok": True, "skipped": True, "reason": "window_too_small"}
+
+    pass_no = int(session.get("pass_count") or 0) + 1
+    wav = LIVE_DIR / session_id / f"pass_{pass_no}.wav"
+    try:
+        _extract_live_audio(session["recording_path"], clip_from, clip_to, wav)
+        data = asr.transcribe(wav, ASR_DIR / "live" / session_id)
+        window = []
+        for seg in (data.get("segments") or []):
+            item = dict(seg)
+            item["start"] = float(item.get("start", 0)) + clip_from
+            item["end"] = float(item.get("end", 0)) + clip_from
+            for word in (item.get("words") or []):
+                word["start"] = float(word.get("start", 0)) + clip_from
+                word["end"] = float(word.get("end", 0)) + clip_from
+            window.append(item)
+        if not window:
+            raise RuntimeError("No speech found in this live window")
+
+        job["transcript"] = list(job.get("transcript") or []) + window
+        candidates = select_clips(
+            window,
+            video_duration=clip_to,
+            num_clips=max(2, min(8, int(session.get("target_clips") or 5))),
+            clip_length=job.get("clip_length", "medium"),
+            goal=session.get("curation_prompt") or job.get("goal") or "funny reactions worth rewatching",
+        )
+        fresh = payoff.extend_to_payoff(
+            payoff.exclude_used(candidates, job.get("clips") or []), window, duration=clip_to)
+        fresh = fresh[:max(1, int(session.get("target_clips") or 5))]
+        if not fresh:
+            raise RuntimeError("No new moments in this live window")
+
+        hooks = _make_hooks(job, fresh)
+        channel = job.get("channel") or "Unsorted"
+        preset = library.load_presets().get(channel, {})
+        old_count = len(job.get("clips") or [])
+        for j, c in enumerate(fresh):
+            c.update({
+                "index": old_count + j,
+                "render_status": "pending",
+                "url": None,
+                "error": None,
+                "hooks": hooks[j] if j < len(hooks) else [c.get("title", "Watch this")],
+                "hook_index": 0,
+                "focus": c.get("focus") or {"cx": float(preset.get("cx", 0.10)), "cy": float(preset.get("cy", 0.30))},
+                "face_shift_ms": float(preset.get("face_shift_ms", 150)),
+                "watermark": str(preset.get("watermark", "@NOCTX")),
+                "source_start_seconds": c.get("start"),
+                "source_end_seconds": c.get("end"),
+                "batch": pass_no,
+                "parent_job": job["id"],
+            })
+        job["clips"] = list(job.get("clips") or []) + fresh
+        _set(job["id"], clips=job["clips"], status="needs_review", stage="review",
+             message=f"Live pass {pass_no} found {len(fresh)} new moments.")
+
+        session["pass_count"] = pass_no
+        session["clipped_until_seconds"] = clip_to
+        session["phase"] = "waiting"
+        session["last_error"] = None
+        total = len(job["clips"])
+        if total >= int(session.get("max_clips") or 60):
+            session["stop_reason"] = "clip_limit_reached"
+            _stop_live_recorder(session_id, "clip_limit_reached")
+        else:
+            session["next_pass_at"] = time.time() + float(session.get("pass_window_seconds") or 1800)
+        session["updated_at"] = _now()
+        _persist_live(session_id)
+        return {"ok": True, "pass": pass_no, "added": len(fresh), "from": clip_from, "until": clip_to}
+    except Exception as e:  # noqa: BLE001
+        session["last_error"] = str(e)[:500]
+        session["phase"] = "waiting"
+        session["next_pass_at"] = time.time() + float(session.get("pass_window_seconds") or 1800)
+        session["updated_at"] = _now()
+        _persist_live(session_id)
+        return {"ok": False, "pass": pass_no, "error": str(e)[:500]}
+
+
+def _record_live(session_id: str) -> None:
+    """Capture a live HLS stream into a local rolling recording."""
+    session = live_sessions.get(session_id)
+    if not session:
+        return
+    try:
+        media_url, header_args = sources._resolve_media_url(session["src_url"])
+    except Exception as e:  # noqa: BLE001
+        _stop_live_recorder(session_id, "source_unavailable")
+        session["last_error"] = str(e)[:500]
+        _persist_live(session_id)
+        return
+
+    recording = Path(session["recording_path"])
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        shutil.which("ffmpeg") or "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        *header_args, "-i", media_url, "-c", "copy", "-f", "mpegts", str(recording),
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:  # noqa: BLE001
+        _stop_live_recorder(session_id, "repeated_errors")
+        session["last_error"] = str(e)[:500]
+        _persist_live(session_id)
+        return
+    LIVE_RECORDERS[session_id] = proc
+    session["phase"] = "clipping"
+    session["updated_at"] = _now()
+    _persist_live(session_id)
+
+    started = float(session.get("started_at_epoch") or time.time())
+    first = float(session.get("first_pass_seconds") or 900)
+    window = float(session.get("pass_window_seconds") or 1800)
+    session["next_pass_at"] = started + first
+    _persist_live(session_id)
+
+    while proc.poll() is None:
+        current = live_sessions.get(session_id)
+        if not current or current.get("stop_requested") or current.get("state") != "live":
+            break
+        if time.time() >= float(current.get("next_pass_at") or 0):
+            _run_live_pass(session_id)
+            current = live_sessions.get(session_id)
+            if not current or current.get("state") != "live":
+                break
+            current["next_pass_at"] = time.time() + window
+            _persist_live(session_id)
+        time.sleep(5)
+    current = live_sessions.get(session_id)
+    if current and current.get("state") == "live":
+        _stop_live_recorder(session_id, "source_ended")
+
+
+def _save_publication(item: dict) -> None:
+    for i, existing in enumerate(publications):
+        if existing.get("id") == item.get("id"):
+            publications[i] = item
+            break
+    else:
+        publications.append(item)
+    library.save_publications(publications)
+    if cloud.enabled():
+        try:
+            cloud.save_publication(item)
+        except Exception as e:  # noqa: BLE001
+            print(f"[cloud] publication sync failed: {e}", flush=True)
+
+
+def _woopsocial_payload(item: dict) -> dict:
+    job = jobs.get(item.get("job_id"), {})
+    idx = int(item.get("clip_idx") or 0)
+    clip = (job.get("clips") or [])[idx] if 0 <= idx < len(job.get("clips") or []) else {}
+    base = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+    media_url = str(clip.get("url") or "")
+    if media_url.startswith("/"):
+        media_url = base + media_url
+    tags = item.get("hashtags") or []
+    caption = str(item.get("caption") or clip.get("hook_title") or clip.get("title") or "")
+    if tags:
+        caption = caption.rstrip() + "\n\n" + " ".join("#" + str(t).lstrip("#") for t in tags)
+    return {
+        "platform": item.get("platform"),
+        "account": item.get("social_account"),
+        "text": caption,
+        "media_url": media_url,
+        "scheduled_at": item.get("scheduled_at"),
+    }
+
+
+def _post_to_woopsocial(item: dict) -> dict:
+    """Post through WoopSocial when API credentials are configured."""
+    payload = _woopsocial_payload(item)
+    api = os.getenv("WOOP_SOCIAL_API_URL", "").rstrip("/")
+    key = os.getenv("WOOP_SOCIAL_API_KEY", "")
+    if not api or not key:
+        return {
+            "ok": False,
+            "needs_integration": True,
+            "error": "WoopSocial API is not configured. Add WOOP_SOCIAL_API_URL and WOOP_SOCIAL_API_KEY to .env.",
+            "payload": payload,
+        }
+    try:
+        r = requests.post(
+            f"{api}/posts",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if r.status_code >= 300:
+            return {"ok": False, "error": str(data.get("message") or data.get("error") or r.text[:300]), "payload": payload}
+        return {"ok": True, "post_id": data.get("id") or data.get("post_id"), "payload": payload}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:400], "payload": payload}
+
+
 def _local_words(job: dict, start: float, end: float) -> list[dict]:
     out = []
     for w in _flat_words(job):
@@ -418,10 +807,17 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
         out_path = CLIP_DIR / f"{job_id}_draft_{i}.mp4"
     start, end = float(clip["start"]), float(clip["end"])
     is_url = bool(job.get("source_url"))
+    is_live = bool(job.get("is_live")) and not is_url
+    layout = settings.get("layout", "split" if is_url else "source")
+    use_split = layout == "split" and (is_url or is_live)
 
     try:
         if is_url:
             sec = _section_for(job_id, job["source_url"], start, end)
+            input_path = str(sec)
+            local_end = probe_duration(input_path) or max(2, end - start)
+        elif is_live and use_split:
+            sec = _local_section(job.get("video_path"), start, end, SECTION_DIR / f"live_{job_id}_{i}.mp4")
             input_path = str(sec)
             local_end = probe_duration(input_path) or max(2, end - start)
         else:
@@ -429,12 +825,11 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
             local_end = end
 
         words = _local_words(job, start, end)
-        layout = settings.get("layout", "split" if is_url else "source")
         encoder, eargs = hardware.encoder_args(True)
         hooks = clip.get("hooks") or [clip.get("title", "Watch this")]
         hook = str(hooks[int(clip.get("hook_index", 0))] if hooks else clip.get("title", ""))[:90]
 
-        if layout == "split" and is_url:
+        if use_split:
             from layout import render_split
             focus = clip.get("focus") or {}
             result = render_split(
@@ -450,7 +845,7 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
             )
         else:
             result = render_clip(
-                input_path, {"start": 0.0 if is_url else start, "end": local_end},
+                input_path, {"start": 0.0 if (is_url or use_split) else start, "end": local_end},
                 str(out_path), words=words if not draft else None,
                 captions=bool(settings.get("captions", True)) and not draft,
                 vertical=bool(settings.get("vertical", True)),
@@ -1075,9 +1470,152 @@ async def regenerate_clip(job_id: str, index: int, body: RegenerateBody):
     return {"ok": True, "index": index, "clip": replacement}
 
 
+TOOL_SPECS = [
+    {"name": "start_live_session", "description": "Start recording a live URL and run rolling clipping passes."},
+    {"name": "stop_live_session", "description": "Stop a live recording session."},
+    {"name": "get_live_status", "description": "List live sessions and their pass state."},
+    {"name": "get_jobs", "description": "List saved source jobs grouped by streamer."},
+    {"name": "get_clips", "description": "Get scored moments for a job."},
+    {"name": "get_transcript", "description": "Get the transcript for a job."},
+    {"name": "cut_clip_from_range", "description": "Add a manual moment from exact start/end seconds."},
+    {"name": "render_clip", "description": "Render one or more selected clip indices."},
+    {"name": "write_post_caption", "description": "Write a short platform caption with tags."},
+    {"name": "schedule_publication", "description": "Schedule an approved clip post."},
+    {"name": "get_usage", "description": "Summarize jobs, clips, live sessions, and scheduled posts."},
+]
+
+
+async def _run_tool(name: str, args: dict) -> dict:
+    args = args or {}
+    if name == "list_tools" or name == "get_tools":
+        return {"tools": TOOL_SPECS}
+    if name == "start_live_session":
+        return await start_live(LiveStartBody(**args))
+    if name == "stop_live_session":
+        sid = str(args.get("session_id") or "")
+        return await stop_live(sid)
+    if name == "get_live_status":
+        sid = args.get("session_id")
+        return get_live_session(str(sid)) if sid else list_live_sessions()
+    if name == "get_jobs":
+        return {"groups": library.grouped()}
+    if name == "get_clips":
+        job_id = str(args.get("job_id") or "")
+        if job_id not in jobs:
+            raise HTTPException(404, "Job not found")
+        _ensure_clip_extras(jobs[job_id])
+        return {"job_id": job_id, "clips": jobs[job_id].get("clips", [])}
+    if name == "get_transcript":
+        return get_transcript(str(args.get("job_id") or ""))
+    if name == "cut_clip_from_range":
+        job_id = str(args.get("job_id") or "")
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        start = float(args.get("start", 0))
+        end = float(args.get("end", start + 30))
+        if end <= start:
+            raise HTTPException(400, "End must be after start")
+        clip = {
+            "index": len(job.get("clips") or []),
+            "start": round(start, 2), "end": round(end, 2),
+            "title": str(args.get("title") or "Manual cut"),
+            "reason": str(args.get("reason") or "Cut from an exact range in Agent."),
+            "score": float(args.get("score") or 80),
+            "render_status": "pending", "url": None, "error": None,
+            "hooks": [str(args.get("title") or "Manual cut")], "hook_index": 0,
+            "watermark": "@NOCTX", "face_shift_ms": 150,
+            "focus": {"cx": 0.10, "cy": 0.30}, "batch": 0, "parent_job": job_id,
+        }
+        job["clips"] = list(job.get("clips") or []) + [clip]
+        _set(job_id, clips=job["clips"], status="needs_review", stage="review",
+             message="Manual range added. Render it when ready.")
+        return {"ok": True, "index": clip["index"], "clip": clip}
+    if name == "render_clip":
+        job_id = str(args.get("job_id") or "")
+        indices = [int(x) for x in (args.get("indices") or [])]
+        return await render_selected(job_id, RenderSelectedBody(indices=indices))
+    if name == "write_post_caption":
+        hook = str(args.get("hook") or "watch this")
+        platform = str(args.get("platform") or "tiktok").lower()
+        tags = [str(x).lstrip("#") for x in (args.get("hashtags") or [])][:5]
+        if not tags:
+            tags = ["gta6", "gta6clips", "fyp"] if platform == "tiktok" else ["shorts", "gta6"]
+        return {"caption": hook.lower().strip(), "hashtags": tags,
+                "text": hook.lower().strip() + "\n\n" + " ".join("#" + t for t in tags)}
+    if name == "schedule_publication":
+        return await create_publication(PublicationBody(**args))
+    if name == "get_usage":
+        return {
+            "jobs": len(jobs),
+            "clips": sum(len(j.get("clips") or []) for j in jobs.values()),
+            "live_sessions": len(live_sessions),
+            "publications": len(publications),
+        }
+    raise ValueError(f"Unknown tool: {name}")
+
+
+@app.get("/api/tools")
+def list_tool_specs():
+    return {"tools": TOOL_SPECS}
+
+
+class ToolCallBody(BaseModel):
+    name: str
+    args: dict | None = None
+
+
+@app.post("/api/tools/call")
+async def call_tool(body: ToolCallBody, request: Request):
+    header = request.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    user = supabase_auth.verify(token) if token else None
+    ok = True
+    error = None
+    try:
+        result = await _run_tool(body.name, body.args or {})
+    except HTTPException as e:
+        ok, error, result = False, str(e.detail), {"detail": e.detail}
+    except Exception as e:  # noqa: BLE001
+        ok, error, result = False, str(e)[:400], {"detail": str(e)[:400]}
+    cloud.record_tool_call(body.name, args=body.args or {}, ok=ok, error=error,
+                           user_email=(user or {}).get("email"))
+    return {"ok": ok, "tool": body.name, "result": result, "error": error}
+
+
+def _chat_tool_request(message: str) -> tuple[str, dict] | None:
+    text = message.strip()
+    low = text.lower()
+    if low in ("tools", "what tools", "list tools", "/tools"):
+        return "list_tools", {}
+    if low.startswith("live status") or low.startswith("/live status"):
+        return "get_live_status", {}
+    if low.startswith("stop live") or low.startswith("/stop live"):
+        parts = text.split()
+        return "stop_live_session", {"session_id": parts[2] if len(parts) > 2 else ""}
+    if low.startswith("start live") or low.startswith("/live"):
+        import re
+        m = re.search(r"https?://\S+", text)
+        if m:
+            return "start_live_session", {"url": m.group().rstrip(".,)")}
+    return None
+
+
 @app.post("/api/chat")
 async def chat(message: str = Form(...), job_id: str | None = Form(None)):
     parsed = agent.parse_request(message)
+    tool_request = _chat_tool_request(message)
+    if tool_request:
+        tool_name, tool_args = tool_request
+        try:
+            tool_result = await _run_tool(tool_name, tool_args)
+            cloud.record_tool_call(tool_name, args=tool_args, ok=True)
+            brief = json.dumps(tool_result.get("result", tool_result), ensure_ascii=False)[:1600]
+            reply = agent.reply(message, f"Tool {tool_name} completed. Result: {brief}")
+            return {"reply": reply, "job_id": job_id, "parsed": {**parsed, "tool": tool_name}, "tool_result": tool_result}
+        except Exception as e:  # noqa: BLE001
+            cloud.record_tool_call(tool_name, args=tool_args, ok=False, error=str(e))
+            return {"reply": f"Tool {tool_name} failed: {e}", "job_id": job_id, "parsed": parsed}
     job = jobs.get(job_id or "")
     context = ""
     if job:
@@ -1124,6 +1662,7 @@ def status(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    _ensure_clip_extras(job)
     return {
         "id": job["id"], "status": job["status"], "stage": job.get("stage"),
         "progress": job.get("progress", 0), "message": job.get("message", ""),
@@ -1134,8 +1673,117 @@ def status(job_id: str):
         "transcript_source": job.get("transcript_source"), "asr_backend": job.get("asr_backend"),
         "channel": job.get("channel"), "notes": job.get("notes", {}),
         "parent_job": job.get("parent_job"), "draft": job.get("draft", False),
+        "is_live": job.get("is_live", False), "live_url": job.get("live_url"),
         "cancel_requested": job.get("cancel_requested", False),
     }
+
+
+class LiveStartBody(BaseModel):
+    url: str
+    goal: str = ""
+    num_clips: int = 5
+    max_clips: int = 60
+    max_duration_seconds: int = 43200
+    first_pass_seconds: int = 900
+    pass_window_seconds: int = 1800
+
+
+@app.post("/api/live/start")
+async def start_live(body: LiveStartBody):
+    url = (body.url or "").strip()
+    if not url:
+        raise HTTPException(400, "Enter a live URL")
+    try:
+        info = resolve_url(url)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Could not read that live link: {_friendly_error(e)}")
+
+    session_id = uuid.uuid4().hex[:12]
+    recording = LIVE_DIR / session_id / "stream.ts"
+    job_id = _new_job(
+        source_url=None,
+        source_info=info,
+        channel=library.channel_for(info, url),
+        video_path=str(recording),
+        duration=float(body.max_duration_seconds),
+        num_clips=max(1, min(body.num_clips, 24)),
+        clip_length="medium",
+        settings={"captions": True, "vertical": True, "layout": "split"},
+        goal=body.goal or "funny reactions worth rewatching",
+        is_live=True,
+        live_url=url,
+        message="Recording live stream...",
+    )
+    now = time.time()
+    session = {
+        "id": session_id,
+        "job_id": job_id,
+        "provider": str(info.get("platform") or "live"),
+        "src_url": url,
+        "state": "live",
+        "phase": "clipping",
+        "pass_count": 0,
+        "clipped_from_seconds": 0.0,
+        "clipped_until_seconds": 0.0,
+        "next_pass_at": now + max(30, body.first_pass_seconds),
+        "stop_reason": None,
+        "target_clips": max(1, min(body.num_clips, 24)),
+        "max_clips": max(1, min(body.max_clips, 200)),
+        "max_duration_seconds": max(300, min(body.max_duration_seconds, 86400)),
+        "first_pass_seconds": max(30, body.first_pass_seconds),
+        "pass_window_seconds": max(300, body.pass_window_seconds),
+        "curation_prompt": body.goal or "funny reactions worth rewatching",
+        "settings": {"captions": True, "vertical": True, "layout": "split"},
+        "last_error": None,
+        "recording_path": str(recording),
+        "started_at_epoch": now,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    live_sessions[session_id] = session
+    _persist_live(session_id)
+    threading.Thread(target=_record_live, args=(session_id,), daemon=True).start()
+    return {"session_id": session_id, "job_id": job_id, "first_pass_in": session["first_pass_seconds"]}
+
+
+@app.get("/api/live/sessions")
+def list_live_sessions():
+    items = [_live_cloud_row(s) for s in live_sessions.values()]
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return {"sessions": items}
+
+
+@app.get("/api/live/{session_id}")
+def get_live_session(session_id: str):
+    session = live_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Live session not found")
+    job_id = session.get("job_id")
+    return {"session": _live_cloud_row(session), "job": status(job_id) if job_id in jobs else None}
+
+
+@app.post("/api/live/{session_id}/stop")
+async def stop_live(session_id: str):
+    if session_id not in live_sessions:
+        raise HTTPException(404, "Live session not found")
+    session = live_sessions[session_id]
+    if session.get("state") == "live":
+        session["stop_requested"] = True
+        session["phase"] = "waiting"
+        session["updated_at"] = _now()
+        _persist_live(session_id)
+    _stop_live_recorder(session_id, "manual")
+    return {"ok": True}
+
+
+@app.post("/api/live/{session_id}/pass")
+async def force_live_pass(session_id: str):
+    session = live_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "Live session not found")
+    if session.get("state") != "live":
+        raise HTTPException(409, "Live session is not active")
+    return _run_live_pass(session_id)
 
 
 @app.get("/api/asr/status")
@@ -1273,6 +1921,29 @@ async def set_clip_note(job_id: str, index: int, body: NoteBody):
     return {"ok": True, "note": body.note}
 
 
+class EditorStateBody(BaseModel):
+    tracks: list[dict]
+    config: dict
+    trim_start: float | None = None
+    trim_end: float | None = None
+
+
+@app.put("/api/clips/{job_id}/{index}/editor")
+async def set_editor_state(job_id: str, index: int, body: EditorStateBody):
+    job = jobs.get(job_id)
+    if not job or not (0 <= index < len(job.get("clips") or [])):
+        raise HTTPException(404, "Clip not found")
+    clip = job["clips"][index]
+    clip["tracks"] = body.tracks
+    clip["config"] = body.config
+    if body.trim_start is not None:
+        clip["trim_start"] = float(body.trim_start)
+    if body.trim_end is not None:
+        clip["trim_end"] = float(body.trim_end)
+    _set(job_id, clips=list(job["clips"]))
+    return {"ok": True, "tracks": clip["tracks"], "config": clip["config"]}
+
+
 class PresetBody(BaseModel):
     channel: str
     focus: dict
@@ -1330,6 +2001,94 @@ def get_publish_queue():
 @app.post("/api/publish-queue")
 async def post_publish_queue(body: PublishBody):
     return {"items": library.save_publish_queue(body.items)}
+
+
+class PublicationBody(BaseModel):
+    job_id: str
+    clip_idx: int
+    platform: str
+    caption: str = ""
+    hashtags: list[str] = []
+    scheduled_at: str | None = None
+    social_account: str | None = None
+    approved: bool = False
+
+
+@app.get("/api/publications")
+def get_publications():
+    items = sorted(publications, key=lambda x: x.get("scheduled_at") or "", reverse=False)
+    return {"items": items}
+
+
+@app.post("/api/publications")
+async def create_publication(body: PublicationBody):
+    job = jobs.get(body.job_id)
+    if not job or not (0 <= body.clip_idx < len(job.get("clips") or [])):
+        raise HTTPException(404, "Clip not found")
+    platform = (body.platform or "").strip().lower()
+    if platform not in ("tiktok", "youtube", "instagram", "x"):
+        raise HTTPException(400, "Unsupported platform")
+    item = {
+        "id": uuid.uuid4().hex[:12],
+        "job_id": body.job_id,
+        "clip_idx": int(body.clip_idx),
+        "platform": platform,
+        "social_account": body.social_account,
+        "caption": body.caption,
+        "hashtags": [str(x).lstrip("#") for x in body.hashtags][:10],
+        "scheduled_at": body.scheduled_at,
+        "status": "approved" if body.approved else "scheduled",
+        "approved": bool(body.approved),
+        "post_id": None,
+        "error": None,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    _save_publication(item)
+    return {"item": item}
+
+
+@app.post("/api/publications/{pub_id}/approve")
+async def approve_publication(pub_id: str):
+    item = next((p for p in publications if p.get("id") == pub_id), None)
+    if not item:
+        raise HTTPException(404, "Publication not found")
+    item.update({"approved": True, "status": "approved", "updated_at": _now()})
+    _save_publication(item)
+    return {"item": item}
+
+
+@app.post("/api/publications/{pub_id}/post")
+async def post_publication(pub_id: str):
+    item = next((p for p in publications if p.get("id") == pub_id), None)
+    if not item:
+        raise HTTPException(404, "Publication not found")
+    if not item.get("approved"):
+        raise HTTPException(409, "Approve this clip before posting")
+    result = _post_to_woopsocial(item)
+    if result.get("ok"):
+        item.update({"status": "posted", "post_id": result.get("post_id"), "error": None, "updated_at": _now()})
+    elif result.get("needs_integration"):
+        item.update({"status": "needs_integration", "error": result.get("error"), "updated_at": _now()})
+    else:
+        item.update({"status": "failed", "error": result.get("error"), "updated_at": _now()})
+    _save_publication(item)
+    return {"item": item, "result": result}
+
+
+@app.delete("/api/publications/{pub_id}")
+async def cancel_publication(pub_id: str):
+    item = next((p for p in publications if p.get("id") == pub_id), None)
+    if not item:
+        raise HTTPException(404, "Publication not found")
+    publications[:] = [p for p in publications if p.get("id") != pub_id]
+    library.save_publications(publications)
+    if cloud.enabled():
+        try:
+            cloud.delete_publication(item["id"])
+        except Exception:
+            pass
+    return {"ok": True}
 
 
 # Serve the frontend

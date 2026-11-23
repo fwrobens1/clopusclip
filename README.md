@@ -44,9 +44,28 @@ First run downloads a ~75 MB Whisper model.
 - “Remember this device” stores the session in local storage; otherwise it stays in session storage for the current tab.
 - Shared `?job=<id>` links work after sign-in and restore the clip grid.
 
+### Agent tool layer
+- The pipeline is exposed as callable tools (`GET /api/tools`, `POST /api/tools/call`) the agent can use: start/stop live sessions, list jobs and clips, read transcripts, cut a range, render, write post copy, schedule a publication, and check usage.
+- Every tool call is recorded in `noethara_tool_calls` for auditing. In Agent chat, short commands like `tools`, `live status`, `start live <url>`, and `stop live <id>` dispatch straight to the tool layer.
+
+### Explainable scoring + review feed
+- Each clip now carries a `score_reason`, generated `hook_title`, and `transcript_excerpt` so the review feed shows *why* a moment was picked, not just a number. All fields persist in `noethara_clips`.
+
+### Live clipping sessions
+- **Live** view records a livestream locally and runs rolling passes (first pass + repeating 30-minute windows) instead of waiting for the VOD.
+- State machine with `state` / `phase` / `pass_count` / `clipped_until_seconds` / `next_pass_at` / `stop_reason`; dedupes by absolute stream seconds so the same moment is never clipped twice.
+- Restart-safe: sessions restore from Supabase on boot and stale live sessions are marked stopped. Endpoints under `/api/live/*` (start, list, detail, stop, force pass). Recording must run on a trusted machine with storage for the rolling buffer.
+
+### Publishing schedule
+- Approve and schedule prepared TikTok/YouTube Shorts posts from the Clips publish panel. Queue lives in `noethara_publications` (approval gate + status + post id/error).
+- The WoopSocial post hook is wired (`WOOP_SOCIAL_API_URL` / `WOOP_SOCIAL_API_KEY`); without those set it returns `needs_integration` and nothing is published accidentally.
+
+### Track editor model
+- Clips carry editable `tracks` + `config` (aspect ratio, layout, captions, hook, trim) persisted through `PUT /api/clips/{id}/{n}/editor` and stored in Supabase — the foundation for a fuller timeline editor.
+
 ### UI
 - Charcoal/near-black **NoetharaClipz v2** dashboard with your logo, compact sidebar, composer, session rail, clip cards, and editor shell.
-- Four views: **Studio** (run jobs), **Agent** (chat), **Clips** (session results), **Library** (sources grouped by streamer), plus a clip preview editor.
+- Views: **Studio** (run jobs), **Agent** (chat), **Clips** (session results), **Library** (sources grouped by streamer), **Live** (realtime sessions), plus a clip preview editor.
 - Real backend wiring: link preview, URL/upload/transcript jobs, live progress, results, chat, downloads, and re-renders.
 - **Review before render**: rank moments first, pick checkboxes, scrub 360p drafts, regenerate a weak moment, then render only the keepers.
 - **Continue clipping**: find the next batch from a long VOD while excluding moments already used.
@@ -82,7 +101,7 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 
 - **Processing speed without Groq/GPU**: OpusClip/Klap's 7h-in-30min comes from cloud GPU farms. On CPU-only local Whisper, a 7-hour VOD with no captions takes hours. Sources with existing captions are near-instant.
 - **YouTube bot checks**: unauthenticated YouTube may be blocked. Set `YT_COOKIES_FROM_BROWSER=chrome` in `.env` to use your browser cookies (or use Twitch/Kick/direct links).
-- **Live streams**: resolves live URLs, but "realtime clipping while broadcasting" in the cloud sense isn't replicated — it processes VODs and recorded streams.
+- **Live streams**: the **Live** view does real rolling-pass clipping from a local recording while a stream is on, but it's a local MVP — it needs a machine running continuously with disk space for the buffer, not an always-on cloud service. Finished VODs remain the simplest path.
 - The `ANYMODEL_API_KEY` is stored but unused (base URL unresolved). NVIDIA free models power all AI.
 
 ## Configuration
@@ -108,6 +127,9 @@ Default when no Groq key. Fine for short videos; a 7h VOD takes hours on a CPU.
 | `SUPABASE_BUCKET` | Storage bucket for finished clips (`rendered-clips`) |
 | `SUPABASE_SIGNED_TTL` | `3600` seconds — lifetime of playback URLs |
 | `SUPABASE_TIMEOUT` | `120` seconds per upload |
+| `WOOP_SOCIAL_API_URL` | WoopSocial REST/MCP endpoint for publishing scheduled posts |
+| `WOOP_SOCIAL_API_KEY` | API key for WoopSocial publishing (posts stay local until set) |
+| `PUBLIC_BASE_URL` | Public dashboard URL included in post payloads |
 
 To recreate the cloud tables in a fresh project, run `backend/supabase_schema.sql`.
 One-time migration of existing local clips: `venv/Scripts/python.exe backend/migrate_to_supabase.py`.
@@ -138,4 +160,8 @@ work/           # uploads, audio, sections, subs, clips (gitignored)
 - `POST /api/cancel/{id}`, `POST /api/retry/{id}/{n}`, `POST /api/retry-failed/{id}` (renders every failed or queued clip)
 - `GET /api/library`, `GET /api/jobs/{id}`, `PUT /api/clips/{id}/{n}/note`
 - `GET/POST /api/presets`, `POST /api/presets/bulk`, `GET/POST /api/dictionary`, `GET/POST /api/publish-queue`
+- `GET /api/tools`, `POST /api/tools/call` — agent-callable pipeline tools
+- `GET /api/live/sessions`, `POST /api/live/start`, `GET/POST /api/live/{id}`, `POST /api/live/{id}/stop`, `POST /api/live/{id}/pass`
+- `GET/POST /api/publications`, `POST /api/publications/{id}/approve`, `POST /api/publications/{id}/post`, `DELETE /api/publications/{id}`
+- `PUT /api/clips/{id}/{n}/editor` — save track/config state
 - `GET /api/hardware`, `GET /api/asr/status`

@@ -7,6 +7,7 @@ short-lived signed Storage URL.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,13 +24,22 @@ def enabled() -> bool:
     return bool(URL and KEY and BUCKET)
 
 
+TABLES = (
+    "noethara_jobs",
+    "noethara_clips",
+    "noethara_live_sessions",
+    "noethara_publications",
+    "noethara_tool_calls",
+)
+
+
 def status() -> dict[str, Any]:
     return {
         "enabled": enabled(),
         "url": URL,
         "bucket": BUCKET,
         "signed_ttl": SIGNED_TTL,
-        "tables": ("noethara_jobs", "noethara_clips"),
+        "tables": TABLES,
     }
 
 
@@ -126,6 +136,28 @@ def _rest(table: str, payload: dict | list, conflict: str | None = None) -> None
         raise RuntimeError(f"Supabase {table} upsert failed ({r.status_code}): {r.text[:300]}")
 
 
+def list_rows(table: str, *, filters: dict[str, Any] | None = None,
+              limit: int = 200, order: str | None = None) -> list[dict[str, Any]]:
+    """Read rows through PostgREST using the server-side key."""
+    if not enabled():
+        return []
+    params: dict[str, Any] = {"select": "*", "limit": int(limit)}
+    for key, value in (filters or {}).items():
+        params[key] = f"eq.{value}"
+    if order:
+        params["order"] = order
+    r = requests.get(
+        f"{URL}/rest/v1/{table}",
+        headers=_headers({"Accept": "application/json"}),
+        params=params,
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Supabase {table} read failed ({r.status_code}): {r.text[:300]}")
+    data = r.json()
+    return data if isinstance(data, list) else []
+
+
 def save_job(detail: dict[str, Any]) -> None:
     """Persist one job summary row."""
     _rest("noethara_jobs", {
@@ -177,5 +209,86 @@ def save_clips(job_id: str, clips: list[dict[str, Any]]) -> None:
             "note": c.get("note"),
             "error": c.get("error"),
             "encoder": c.get("encoder"),
+            "score_reason": c.get("score_reason"),
+            "hook_title": c.get("hook_title") or (c.get("hooks") or [None])[int(c.get("hook_index", 0) or 0)],
+            "transcript_excerpt": c.get("transcript_excerpt"),
+            "tracks": c.get("tracks") or [],
+            "config": c.get("config") or {},
+            "source_start_seconds": c.get("source_start_seconds")
+            if c.get("source_start_seconds") is not None else c.get("start"),
+            "source_end_seconds": c.get("source_end_seconds")
+            if c.get("source_end_seconds") is not None else c.get("end"),
         })
     _rest("noethara_clips", rows, conflict="job_id,idx")
+
+
+LIVE_COLUMNS = {
+    "id", "job_id", "provider", "src_url", "state", "phase", "pass_count",
+    "clipped_from_seconds", "clipped_until_seconds", "next_pass_at", "stop_reason",
+    "target_clips", "max_clips", "max_duration_seconds", "first_pass_seconds",
+    "pass_window_seconds", "curation_prompt", "settings", "last_error",
+    "recording_path", "started_at_epoch", "stop_requested", "created_at", "updated_at",
+}
+
+PUBLICATION_COLUMNS = {
+    "uid", "job_id", "clip_idx", "platform", "social_account", "caption", "hashtags",
+    "scheduled_at", "status", "approved", "post_id", "error", "created_at", "updated_at",
+}
+
+
+def _columns(row: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k in allowed}
+
+
+def save_live_session(session: dict[str, Any]) -> None:
+    """Persist one live clipping session row."""
+    row = _columns(session, LIVE_COLUMNS)
+    due = row.get("next_pass_at")
+    if isinstance(due, (int, float)):
+        row["next_pass_at"] = datetime.fromtimestamp(due, timezone.utc).isoformat().replace("+00:00", "Z")
+    _rest("noethara_live_sessions", row, conflict="id")
+
+
+def load_live_sessions() -> list[dict[str, Any]]:
+    return list_rows("noethara_live_sessions", limit=100, order="created_at.desc")
+
+
+def save_publication(item: dict[str, Any]) -> None:
+    """Persist a scheduled or completed publication."""
+    row = dict(item)
+    row["uid"] = row.pop("id", None)
+    _rest("noethara_publications", _columns(row, PUBLICATION_COLUMNS), conflict="uid")
+
+
+def load_publications() -> list[dict[str, Any]]:
+    return list_rows("noethara_publications", limit=200, order="scheduled_at.asc.nullslast")
+
+
+def delete_publication(uid: str) -> None:
+    if not enabled():
+        return
+    r = requests.delete(
+        f"{URL}/rest/v1/noethara_publications",
+        headers=_headers(),
+        params={"uid": f"eq.{uid}"},
+        timeout=30,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Supabase publication delete failed ({r.status_code}): {r.text[:300]}")
+
+
+def record_tool_call(tool: str, *, args: dict[str, Any] | None = None,
+                     ok: bool = True, error: str | None = None,
+                     user_email: str | None = None) -> None:
+    if not enabled():
+        return
+    try:
+        _rest("noethara_tool_calls", {
+            "tool": tool,
+            "args": args or {},
+            "ok": bool(ok),
+            "error": (error or "")[:500] or None,
+            "user_email": user_email,
+        })
+    except Exception:
+        pass

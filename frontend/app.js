@@ -57,13 +57,16 @@
     presets: {},
     publishItems: [],
     reviewJobId: null,
+    liveSessions: [],
+    publications: [],
+    editorDirty: false,
   };
 
   const opt = { clips: 5, length: 1, captions: true, vertical: true, review: false };
   const lengths = ["15–30s", "30–60s", "60–90s"];
   const lengthValues = ["short", "medium", "long"];
   const STAGES = ["resolve", "audio", "transcript", "select", "render"];
-  const VIEW_NAMES = { studio: "Studio", agent: "Agent", clips: "Clips", library: "Library", editor: "Editor" };
+  const VIEW_NAMES = { studio: "Studio", agent: "Agent", clips: "Clips", library: "Library", live: "Live", editor: "Editor" };
 
   /* ---------------- toast ---------------- */
   function toast(msg, icon = "i-check") {
@@ -112,6 +115,7 @@
     if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
     if (view === "clips") setTimeout(renderAll, 0);
     if (view === "library") setTimeout(loadLibrary, 0);
+    if (view === "live") setTimeout(loadLiveSessions, 0);
   }
   $$(".nav-item").forEach((b) => b.addEventListener("click", () => go(b.dataset.view)));
   const startView = (location.hash || "").replace("#", "");
@@ -611,6 +615,11 @@
         reason: c.reason || "",
         note: d.notes?.[String(i)] || "",
         hooks: c.hooks || [],
+        hookTitle: c.hook_title || "",
+        scoreReason: c.score_reason || "",
+        excerpt: c.transcript_excerpt || "",
+        tracks: c.tracks || [],
+        config: c.config || {},
         focus: c.focus || null,
         face_shift_ms: c.face_shift_ms || 150,
         watermark: c.watermark || "@NOCTX",
@@ -704,6 +713,7 @@
         <div class="clip-sub">
           <span>${c.start}–${c.end}</span><i></i><span>${c.vertical ? "9:16" : "Source"}</span><i></i><span>${c.status === "failed" ? "Failed" : c.status === "rendering" ? "Rendering" : c.status === "pending" ? "Queued" : (c.captions ? "Captions" : "Clean")}</span>${note ? `<i></i>${note}` : ""}
         </div>
+        ${c.scoreReason ? `<p class="clip-why">${esc(c.scoreReason.slice(0, 130))}</p>` : ""}
         ${c.renderError ? `<p class="clip-err">${esc(c.renderError.slice(0, 140))}</p>` : ""}
         ${c.status === "failed" && c.error ? `<p class="clip-err">${esc(c.error.slice(0, 140))}</p>` : ""}
       </div>
@@ -745,8 +755,10 @@
         <input type="checkbox" data-review-check="${i}" ${checked} />
         <span class="review-copy">
           <span class="review-top"><b>${esc(c.title || `Clip ${i + 1}`)}</b><span class="review-score">${score}</span><span class="note-chip">${status}</span></span>
-          <span class="review-meta">${fmt(c.start)}–${fmt(c.end)} · ${esc((c.reason || "no reason supplied").slice(0, 110))}</span>
-          <span class="review-reason">${esc(c.reason || "")}</span>
+          ${c.hook_title ? `<span class="hook-title">${esc(c.hook_title)}</span>` : ""}
+          <span class="review-meta">${fmt(c.start)}–${fmt(c.end)} · score ${score}/100</span>
+          <span class="review-reason">${esc(c.score_reason || c.reason || "Selected by the moment scorer.")}</span>
+          ${c.transcript_excerpt ? `<span class="review-excerpt">“${esc(c.transcript_excerpt.slice(0, 180))}”</span>` : ""}
         </span>
         <button type="button" class="review-regen" data-review-regen="${i}">regenerate</button>
       </label>`;
@@ -1036,6 +1048,136 @@
     } catch (e) { toast(esc(e.message)); }
   });
 
+  /* ---------------- live sessions ---------------- */
+  function liveCountdown(value) {
+    if (!value) return "—";
+    const t = typeof value === "number" ? value * 1000 : Date.parse(value);
+    if (!Number.isFinite(t)) return "—";
+    const left = Math.max(0, Math.round((t - Date.now()) / 1000));
+    if (!left) return "due now";
+    return left >= 60 ? `${Math.floor(left / 60)}m ${left % 60}s` : `${left}s`;
+  }
+  async function loadLiveSessions() {
+    const root = $("#liveSessions");
+    if (!root) return;
+    try {
+      const r = await fetch("/api/live/sessions");
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not load live sessions");
+      state.liveSessions = d.sessions || [];
+      renderLiveSessions();
+    } catch (e) {
+      root.innerHTML = `<div class="live-empty">${esc(e.message)}</div>`;
+    }
+  }
+  function renderLiveSessions() {
+    const root = $("#liveSessions");
+    if (!root) return;
+    const sessions = state.liveSessions;
+    const active = sessions.filter((s) => s.state === "live").length;
+    const badge = $("#navLiveCount");
+    if (badge) badge.textContent = String(active);
+    if (!sessions.length) {
+      root.innerHTML = `<div class="live-empty">No live sessions yet. Start one above — only audio from the moment you join can be clipped.</div>`;
+      return;
+    }
+    root.innerHTML = sessions.map((s) => {
+      const st = String(s.state || "stopped");
+      const coverage = Math.max(0, Math.min(100,
+        Math.round((Number(s.clipped_until_seconds || 0) / Math.max(1, Number(s.max_duration_seconds || 43200))) * 100)));
+      const stats = [
+        ["Passes", String(s.pass_count || 0)],
+        ["Covered", fmt(s.clipped_until_seconds || 0)],
+        ["Target", String(s.target_clips || 0) + "/pass"],
+        ["Next pass", liveCountdown(s.next_pass_at)],
+      ];
+      const note = s.last_error
+        ? `<p class="live-note err">${esc(String(s.last_error).slice(0, 180))}</p>`
+        : st === "live"
+          ? `<p class="live-note">Recording and clipping every ${Math.round((Number(s.pass_window_seconds || 1800)) / 60)} minutes. New moments appear in the review feed automatically.</p>`
+          : `<p class="live-note">Session ${esc(s.stop_reason || "stopped")}. Recorded moments stay in the job library.</p>`;
+      return `<article class="live-card">
+        <div class="live-card-head">
+          <span class="live-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-spark"/></svg></span>
+          <div style="min-width:0">
+            <div class="live-card-title" title="${esc(s.src_url || "")}">${esc(s.provider || "Live")} session</div>
+            <div class="live-card-sub">${esc(s.curation_prompt || "")}</div>
+          </div>
+          <span class="live-state ${esc(st)}">${esc(st)}</span>
+        </div>
+        <div class="live-metrics">${stats.map(([k, v]) => `<div class="live-metric"><span>${k}</span><b>${esc(v)}</b></div>`).join("")}</div>
+        <div class="live-track"><i style="width:${coverage}%"></i></div>
+        ${note}
+        <div class="live-actions">
+          ${s.job_id ? `<button class="btn btn-secondary btn-sm" data-live-action="open" data-live-id="${esc(s.id)}">Open clips</button>` : ""}
+          ${st === "live" ? `<button class="btn btn-secondary btn-sm" data-live-action="pass" data-live-id="${esc(s.id)}">Run pass now</button>` : ""}
+          ${st === "live" ? `<button class="btn btn-ghost btn-sm" data-live-action="stop" data-live-id="${esc(s.id)}">Stop</button>` : ""}
+        </div>
+      </article>`;
+    }).join("");
+  }
+  $("#refreshLive")?.addEventListener("click", loadLiveSessions);
+  $("#liveStart")?.addEventListener("click", async () => {
+    const url = $("#liveUrl").value.trim();
+    if (!looksLikeUrl(url)) { toast("Paste a valid live URL", "i-lock"); return; }
+    const btn = $("#liveStart");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/live/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          goal: $("#liveGoal").value.trim(),
+          num_clips: Number($("#liveTarget").value || 5),
+          first_pass_seconds: Number($("#liveFirstPass").value || 900),
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not start live session");
+      toast("Recording started · first pass in " + fmt(d.first_pass_in), "i-bolt");
+      $("#liveUrl").value = "";
+      attachJob(d.job_id, "Live session");
+      await loadLiveSessions();
+    } catch (e) {
+      toast(esc(e.message));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("#liveSessions")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-live-action]");
+    if (!btn) return;
+    const action = btn.dataset.liveAction;
+    const id = btn.dataset.liveId;
+    const session = state.liveSessions.find((s) => s.id === id);
+    if (action === "open") {
+      if (!session?.job_id) return;
+      attachJob(session.job_id, "Live session");
+      go("studio");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/live/${encodeURIComponent(id)}/${action === "stop" ? "stop" : "pass"}`, { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Live command failed");
+      if (action === "pass") {
+        toast(d.skipped ? "Not enough new audio yet" : `Pass ${d.pass || ""} added ${d.added || 0} moments`, "i-refresh");
+        if (session?.job_id) attachJob(session.job_id, "Live session");
+      } else {
+        toast("Live recording stopped", "i-x");
+      }
+      await loadLiveSessions();
+    } catch (err) {
+      toast(esc(err.message));
+      btn.disabled = false;
+    }
+  });
+  setInterval(() => {
+    if ($("#page-live") && !$("#page-live").hidden) renderLiveSessions();
+  }, 5000);
+
   /* ---------------- publish queue ---------------- */
   const DEFAULT_TAGS = "nickeh30,gta6,gta6clips,familyfriendly,fyp";
   function makePublishItem(c) {
@@ -1098,6 +1240,7 @@
       await savePublishQueue(false);
     }
     renderPublish();
+    loadPublications();
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   $("#closePublish").addEventListener("click", () => $("#publishPanel").classList.add("hidden"));
@@ -1114,6 +1257,111 @@
     } catch (e) { toast(esc(e.message)); }
   }
   $("#savePublish").addEventListener("click", () => savePublishQueue());
+
+  async function loadPublications() {
+    const root = $("#scheduleList");
+    if (!root) return;
+    try {
+      const r = await fetch("/api/publications");
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not load scheduled posts");
+      state.publications = d.items || [];
+      renderPublications();
+    } catch (e) {
+      root.innerHTML = `<div class="live-empty">${esc(e.message)}</div>`;
+    }
+  }
+  function publicationTitle(item) {
+    const job = state.jobs.find((j) => j.id === item.job_id);
+    const clip = state.clips.find((c) => c._idx === Number(item.clip_idx));
+    return clip?.title || item.caption?.split("\n")[0] || job?.label || `Clip ${Number(item.clip_idx || 0) + 1}`;
+  }
+  function renderPublications() {
+    const root = $("#scheduleList");
+    if (!root) return;
+    if (!state.publications.length) {
+      root.innerHTML = `<div class="live-empty">Nothing scheduled. Approve a post time above to queue TikTok + Shorts.</div>`;
+      return;
+    }
+    root.innerHTML = state.publications.map((p) => {
+      const when = p.scheduled_at
+        ? new Date(p.scheduled_at).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : "As soon as approved";
+      const status = String(p.status || "scheduled");
+      return `<div class="schedule-item" data-pub-id="${esc(p.id || p.uid || "")}">
+        <div class="schedule-main">
+          <b>${esc(publicationTitle(p))}</b>
+          <span>${esc(String(p.platform || "").toUpperCase())} · ${esc(when)}</span>
+        </div>
+        <span class="schedule-status ${esc(status)}">${esc(status)}</span>
+        ${status !== "posted" ? `<button class="btn btn-ghost btn-xs" data-pub-action="post">Post now</button>` : ""}
+        <button class="icon-btn" data-pub-action="delete" aria-label="Cancel scheduled post"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>`;
+    }).join("");
+  }
+  $("#schedulePublish")?.addEventListener("click", async () => {
+    const when = $("#publishScheduleAt").value;
+    if (!when) { toast("Pick a schedule time first", "i-lock"); return; }
+    if (!state.publishItems.length) { toast("Build a publish queue first", "i-lock"); return; }
+    const btn = $("#schedulePublish");
+    btn.disabled = true;
+    try {
+      await savePublishQueue(false);
+      const scheduledAt = new Date(when).toISOString();
+      let count = 0;
+      for (const item of state.publishItems) {
+        if (!item.job_id) continue;
+        const tags = String(item.tags || "").split(",").map((t) => t.trim().replace(/^#/, "")).filter(Boolean);
+        const targets = [
+          { platform: "tiktok", caption: item.tiktok_copy || item.title, hashtags: tags.slice(0, 5) },
+          { platform: "youtube", caption: item.youtube_copy || item.title, hashtags: ["shorts", ...tags.slice(0, 2)] },
+        ];
+        for (const t of targets) {
+          const r = await fetch("/api/publications", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              job_id: item.job_id, clip_idx: Number(item.index || 0),
+              platform: t.platform, caption: t.caption, hashtags: t.hashtags,
+              scheduled_at: scheduledAt, approved: true,
+            }),
+          });
+          const out = await r.json();
+          if (!r.ok) throw new Error(out.detail || "Could not schedule post");
+          count += 1;
+        }
+      }
+      toast(`Approved and scheduled ${count} posts`, "i-check");
+      await loadPublications();
+    } catch (e) {
+      toast(esc(e.message));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("#scheduleList")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-pub-action]");
+    if (!btn) return;
+    const row = btn.closest("[data-pub-id]");
+    const id = row?.dataset.pubId;
+    if (!id) return;
+    const action = btn.dataset.pubAction;
+    btn.disabled = true;
+    try {
+      const r = await fetch(`/api/publications/${encodeURIComponent(id)}${action === "post" ? "/post" : ""}`, {
+        method: action === "post" ? "POST" : "DELETE",
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Publication action failed");
+      if (d.result?.needs_integration) toast(d.result.error || "WoopSocial API is not configured", "i-lock");
+      else toast(action === "post" ? "Post sent to WoopSocial" : "Scheduled post removed", "i-check");
+      await loadPublications();
+    } catch (err) {
+      toast(esc(err.message));
+      btn.disabled = false;
+    }
+  });
+
   $("#copyPublish").addEventListener("click", async () => {
     if (!state.publishItems.length) { toast("The queue is empty", "i-lock"); return; }
     const text = state.publishItems.map((item) => {
@@ -1348,11 +1596,77 @@
     const hooks = (c.hooks && c.hooks.length) ? c.hooks : [c.title || "Watch this"];
     root.innerHTML = hooks.map((h, i) => `<button type="button" class="hook-choice ${i === Number(c.hook_index || 0) ? "on" : ""}" data-hook="${i}">${esc(h)}</button>`).join("");
   }
+  function renderEditorTracks(c) {
+    const root = $("#editorTracks");
+    if (!root) return;
+    const tracks = c.tracks || [];
+    const count = $("#trackCount");
+    if (count) count.textContent = String(tracks.length);
+    root.innerHTML = tracks.length ? tracks.map((t) => {
+      const items = t.clips || [];
+      const label = items.length ? (items[0].text || items[0].type || items[0].role || "clip") : "empty";
+      return `<div class="editor-track-item"><b>${esc(t.kind || "track")}</b><span>${esc(String(label).slice(0, 42))}</span><span>${items.length}</span></div>`;
+    }).join("") : `<div class="editor-track-item"><b>No tracks</b><span>Open a rendered clip</span></div>`;
+  }
+  function parseTimeValue(value) {
+    const parts = String(value || "").split(":").map(Number);
+    if (parts.some((x) => !Number.isFinite(x))) return null;
+    return parts.reduce((acc, x) => acc * 60 + x, 0);
+  }
+  async function saveEditorState() {
+    const c = state.clips[state.editorIndex];
+    if (!c || !state.jobId) { toast("Open a rendered clip first", "i-lock"); return; }
+    const btn = $("#editorSave");
+    if (btn) btn.disabled = true;
+    try {
+      const tracks = JSON.parse(JSON.stringify(c.tracks || []));
+      const textTrack = tracks.find((t) => t.kind === "text");
+      if (textTrack?.clips?.[0]) textTrack.clips[0].text = (c.hooks || [])[Number(c.hook_index || 0)] || c.title || "";
+      const format = $(".seg-sm .on[data-format]")?.dataset.format || "9x16";
+      const config = JSON.parse(JSON.stringify(c.config || {}));
+      config.aspect_ratio = format === "9x16" ? 0.5625 : format === "1x1" ? 1 : 16 / 9;
+      config.captions = Object.assign({}, config.captions, {
+        enabled: !!$("[data-switch='captions']")?.classList.contains("on"),
+      });
+      config.reframe = Object.assign({}, config.reframe, {
+        guides: !!$("[data-switch='guides']")?.classList.contains("on"),
+        punch: Number($("#punch").value || 1),
+      });
+      const r = await fetch(`/api/clips/${state.jobId}/${state.editorIndex}/editor`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tracks,
+          config,
+          trim_start: parseTimeValue($("#trimIn").value),
+          trim_end: parseTimeValue($("#trimOut").value),
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not save editor project");
+      c.tracks = d.tracks || tracks;
+      c.config = d.config || config;
+      state.editorDirty = false;
+      renderEditorTracks(c);
+      $("#editorState").textContent = "Saved";
+      toast("Editor project saved to Supabase", "i-check");
+    } catch (e) {
+      toast(esc(e.message));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  $("#editorSave")?.addEventListener("click", saveEditorState);
+  $("#page-editor")?.addEventListener("input", () => { state.editorDirty = true; });
+  $("#page-editor")?.addEventListener("click", (e) => {
+    if (e.target.closest("button") && !e.target.closest("#editorSave")) state.editorDirty = true;
+  });
   $("#hookChoices").addEventListener("click", (e) => {
     const b = e.target.closest("[data-hook]");
     const c = state.clips[state.editorIndex];
     if (!b || !c) return;
     c.hook_index = Number(b.dataset.hook);
+    state.editorDirty = true;
     renderHooks(c);
     setHookOverlay((c.hooks || [])[c.hook_index] || c.title || "");
     toast("Hook selected — re-render to apply it", "i-cap");
@@ -1384,6 +1698,9 @@
     $$("[data-insp-panel]").forEach((p) => { p.hidden = p.dataset.inspPanel !== "edit"; });
     go("editor");
     renderHooks(c);
+    renderEditorTracks(c);
+    state.editorDirty = false;
+    $("#editorState").textContent = "Ready";
     setHookOverlay((c.hooks || [])[Number(c.hook_index || 0)] || c.title || "");
     paintTime();
   }
@@ -1657,6 +1974,8 @@
     renderAll();
     checkAsr();
     loadLibrary();
+    loadLiveSessions();
+    loadPublications();
 
     (function restoreJob() {
       const shared = new URLSearchParams(location.search).get("job");
