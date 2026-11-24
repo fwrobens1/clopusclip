@@ -645,6 +645,9 @@ def _run_live_pass(session_id: str) -> dict:
         _persist_live(session_id)
         return {"ok": True, "pass": pass_no, "added": len(fresh), "from": clip_from, "until": clip_to}
     except Exception as e:  # noqa: BLE001
+        # Advance the window even when a pass finds nothing new. Otherwise every
+        # later pass re-reads the same minutes and the session looks frozen.
+        session["clipped_until_seconds"] = clip_to
         session["last_error"] = str(e)[:500]
         session["phase"] = "waiting"
         session["next_pass_at"] = time.time() + float(session.get("pass_window_seconds") or 1800)
@@ -654,54 +657,120 @@ def _run_live_pass(session_id: str) -> dict:
 
 
 def _record_live(session_id: str) -> None:
-    """Capture a live HLS stream into a local rolling recording."""
+    """Capture a live HLS stream and keep rolling clipping passes alive.
+
+    The recorder appends instead of overwriting so a network reconnect never
+    destroys earlier footage, and it restarts ffmpeg instead of ending the
+    session when the stream drops.
+    """
     session = live_sessions.get(session_id)
     if not session:
         return
     try:
         media_url, header_args = sources._resolve_media_url(session["src_url"])
     except Exception as e:  # noqa: BLE001
-        _stop_live_recorder(session_id, "source_unavailable")
         session["last_error"] = str(e)[:500]
-        _persist_live(session_id)
+        _stop_live_recorder(session_id, "source_unavailable")
         return
 
     recording = Path(session["recording_path"])
     recording.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        shutil.which("ffmpeg") or "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        *header_args, "-i", media_url, "-c", "copy", "-f", "mpegts", str(recording),
-    ]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:  # noqa: BLE001
-        _stop_live_recorder(session_id, "repeated_errors")
-        session["last_error"] = str(e)[:500]
-        _persist_live(session_id)
-        return
-    LIVE_RECORDERS[session_id] = proc
-    session["phase"] = "clipping"
-    session["updated_at"] = _now()
-    _persist_live(session_id)
-
+    is_http = str(media_url).lower().startswith(("http://", "https://"))
+    reconnect_args = (
+        ["-reconnect", "1", "-reconnect_streamed", "1",
+         "-reconnect_delay_max", "15", "-rw_timeout", "30000000"]
+        if is_http else []
+    )
     started = float(session.get("started_at_epoch") or time.time())
-    first = float(session.get("first_pass_seconds") or 900)
     window = float(session.get("pass_window_seconds") or 1800)
-    session["next_pass_at"] = started + first
-    _persist_live(session_id)
+    max_duration = float(session.get("max_duration_seconds") or 43200)
+    attempts = 0
 
-    while proc.poll() is None:
+    while True:
         current = live_sessions.get(session_id)
         if not current or current.get("stop_requested") or current.get("state") != "live":
             break
-        if time.time() >= float(current.get("next_pass_at") or 0):
-            _run_live_pass(session_id)
-            current = live_sessions.get(session_id)
-            if not current or current.get("state") != "live":
-                break
-            current["next_pass_at"] = time.time() + window
+        if time.time() - started >= max_duration:
+            _stop_live_recorder(session_id, "max_duration_reached")
+            return
+
+        cmd = [
+            shutil.which("ffmpeg") or "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            *header_args, *reconnect_args, "-i", media_url,
+            "-c", "copy", "-f", "mpegts", "pipe:1",
+        ]
+        handle = None
+        try:
+            handle = recording.open("ab")
+            proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.DEVNULL)
+        except Exception as e:  # noqa: BLE001
+            if handle:
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            attempts += 1
+            current["last_error"] = str(e)[:500]
+            current["phase"] = "reconnecting"
+            current["updated_at"] = _now()
             _persist_live(session_id)
+            if attempts >= 8:
+                _stop_live_recorder(session_id, "repeated_errors")
+                return
+            time.sleep(5)
+            continue
+
+        LIVE_RECORDERS[session_id] = proc
+        current["phase"] = "clipping"
+        current["last_error"] = None
+        if not current.get("next_pass_at"):
+            current["next_pass_at"] = started + float(current.get("first_pass_seconds") or 900)
+        current["updated_at"] = _now()
+        _persist_live(session_id)
+
+        stop_reason = None
+        while proc.poll() is None:
+            current = live_sessions.get(session_id)
+            if not current or current.get("stop_requested") or current.get("state") != "live":
+                break
+            if time.time() - started >= max_duration:
+                stop_reason = "max_duration_reached"
+                break
+            if time.time() >= float(current.get("next_pass_at") or 0):
+                _run_live_pass(session_id)
+                current = live_sessions.get(session_id)
+                if not current or current.get("state") != "live":
+                    break
+                if not current.get("next_pass_at") or current["next_pass_at"] <= time.time():
+                    current["next_pass_at"] = time.time() + window
+                current["updated_at"] = _now()
+                _persist_live(session_id)
+            time.sleep(2)
+
+        if stop_reason:
+            _stop_live_recorder(session_id, stop_reason)
+        try:
+            handle.close()
+        except OSError:
+            pass
+        LIVE_RECORDERS.pop(session_id, None)
+        if stop_reason:
+            return
+
+        current = live_sessions.get(session_id)
+        if not current or current.get("stop_requested") or current.get("state") != "live":
+            break
+        attempts += 1
+        if attempts >= 8:
+            _stop_live_recorder(session_id, "repeated_errors")
+            return
+        current["phase"] = "reconnecting"
+        current["last_error"] = f"Recorder exited (code {proc.returncode}); restarting"
+        current["next_pass_at"] = time.time() + min(60, window)
+        current["updated_at"] = _now()
+        _persist_live(session_id)
         time.sleep(5)
+
     current = live_sessions.get(session_id)
     if current and current.get("state") == "live":
         _stop_live_recorder(session_id, "source_ended")
@@ -874,7 +943,7 @@ def _render_one(job_id: str, i: int, clip: dict, draft: bool = False) -> dict:
                     # Cloud copy is verified; release local disk immediately.
                     try:
                         out_path.unlink(missing_ok=True)
-                    except OSError:
+                    except Exception:  # noqa: BLE001 — host policies may block deletes
                         pass
                 except Exception as e:  # noqa: BLE001
                     clip["cloud_error"] = str(e)[:400]
@@ -949,6 +1018,91 @@ def _render_all_locked(job_id: str, indices: list[int] | None = None, draft: boo
     else:
         _set(job_id, stage="done", progress=100, status="done",
              message="Drafts ready — review and render finals." if draft else "Your clips are ready!")
+
+
+def _clip_output_path(job_id: str, i: int, draft: bool = False) -> Path:
+    name = f"{job_id}_{'draft' if draft else 'clip'}_{i}.mp4"
+    return CLIP_DIR / name
+
+
+def _local_render_ready(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size > 1000 and probe_duration(str(path)) > 1.0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _finalize_existing_clip(job_id: str, i: int, clip: dict) -> bool:
+    """Adopt a completed render file after an interrupted/forgotten render."""
+    if clip.get("render_status") in ("done", "draft"):
+        return True
+    draft = clip.get("render_status") == "draft"
+    path = _clip_output_path(job_id, i, draft)
+    has_local = _local_render_ready(path)
+    storage = clip.get("storage_path")
+    has_cloud = False
+    if storage and cloud.enabled():
+        try:
+            has_cloud = cloud.file_exists(storage)
+        except Exception:  # noqa: BLE001
+            has_cloud = False
+    if not has_local and not has_cloud:
+        return False
+
+    if has_local and cloud.enabled() and not has_cloud and not draft:
+        try:
+            storage = cloud.upload_file(path, f"{job_id}/{i}.mp4")
+            clip["storage_path"] = storage
+            clip["cloud"] = True
+        except Exception as e:  # noqa: BLE001
+            clip["cloud_error"] = str(e)[:400]
+    clip["render_status"] = "draft" if draft else "done"
+    clip["url"] = f"/api/clips/{job_id}/{i}" + ("?draft=1" if draft else "")
+    if not draft:
+        clip["last_url"] = clip["url"]
+    clip["error"] = None
+    clip["render_error"] = None
+    if has_local:
+        try:
+            clip["size_bytes"] = path.stat().st_size
+            clip["width"], clip["height"] = probe_size(str(path))
+        except Exception:  # noqa: BLE001
+            pass
+    # Keep the local copy as a fallback. The signed cloud URL can expire or
+    # fail, and deleting files here can be blocked by host policies.
+    return True
+
+
+def _recover_unfinished_jobs() -> None:
+    """Finalize finished files and resume renders interrupted by a restart."""
+    time.sleep(1)
+    for job_id, job in list(jobs.items()):
+        if job.get("status") not in ("queued", "processing", "drafting"):
+            continue
+        clips = job.get("clips") or []
+        if not clips:
+            continue
+        pending: list[int] = []
+        for i, clip in enumerate(clips):
+            if _finalize_existing_clip(job_id, i, clip):
+                continue
+            if clip.get("render_status") in ("pending", "rendering"):
+                pending.append(i)
+        done_count = sum(1 for c in clips if c.get("render_status") in ("done", "draft"))
+        if pending:
+            _set(job_id, clips=list(clips), status="processing", stage="render",
+                 progress=55 + int(40 * done_count / max(1, len(clips))),
+                 message=f"Recovering {len(pending)} interrupted clips...")
+            if not _start_render(job_id, pending, False):
+                _set(job_id, message="Render already running — retry pending clips from Clips if needed.")
+        else:
+            _set(job_id, clips=list(clips), status="done", stage="done", progress=100,
+                 message=f"Recovered {done_count} rendered clips.")
+
+
+@app.on_event("startup")
+def _start_recovery() -> None:
+    threading.Thread(target=_recover_unfinished_jobs, daemon=True).start()
 
 
 def _flat_words(job: dict) -> list[dict]:
@@ -1898,6 +2052,31 @@ def get_transcript(job_id: str):
 @app.get("/api/library")
 def get_library():
     return {"groups": library.grouped(), "hardware": hardware.ffmpeg_label()}
+
+
+@app.get("/api/jobs")
+def list_jobs():
+    """All known jobs with their clips, so a page reload can restore the UI."""
+    items = []
+    for job in jobs.values():
+        _ensure_clip_extras(job)
+        items.append({
+            "id": job["id"],
+            "status": job.get("status", "queued"),
+            "stage": job.get("stage", "queued"),
+            "progress": job.get("progress", 0),
+            "message": job.get("message", ""),
+            "clips": job.get("clips", []),
+            "channel": job.get("channel"),
+            "title": (job.get("source_info") or {}).get("title") or job.get("filename") or job.get("goal") or job["id"],
+            "goal": job.get("goal", ""),
+            "source_url": job.get("source_url"),
+            "source_info": job.get("source_info"),
+            "created_at": job.get("created_at") or "",
+            "is_live": job.get("is_live", False),
+        })
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return {"jobs": items}
 
 
 @app.get("/api/jobs/{job_id}")

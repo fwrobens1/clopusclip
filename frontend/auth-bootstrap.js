@@ -44,23 +44,38 @@
     return data;
   }
 
+  window.ncRefreshSession = async function () {
+    const current = store.get();
+    if (!current?.refresh_token) return false;
+    const cfg = window.ncPublicConfig;
+    if (!cfg?.enabled) return false;
+    try {
+      const data = await exchange(cfg.supabaseUrl, cfg.anonKey, {
+        path: "/auth/v1/token?grant_type=refresh_token",
+        payload: { refresh_token: current.refresh_token },
+      });
+      const next = store.save(data);
+      window.ncAccess = next.access_token;
+      return true;
+    } catch (e) {
+      store.clear();
+      return false;
+    }
+  };
+
   window.ncAuthReady = (async function () {
     let cfg;
     try { cfg = await fetch("/api/public-config").then((r) => r.json()); }
     catch (e) { return false; }
+    window.ncPublicConfig = cfg;
     if (!cfg.enabled) return false;
 
     let session = store.get();
     if (!session?.access_token) { redirectToAuth(); return false; }
     const expired = !session.expires_at || Number(session.expires_at) < Math.floor(Date.now() / 1000) - 30;
     if (expired && session.refresh_token) {
-      try {
-        const data = await exchange(cfg.supabaseUrl, cfg.anonKey, {
-          path: "/auth/v1/token?grant_type=refresh_token",
-          payload: { refresh_token: session.refresh_token },
-        });
-        session = store.save(data);
-      } catch (e) { store.clear(); redirectToAuth(); return false; }
+      if (!(await window.ncRefreshSession())) { redirectToAuth(); return false; }
+      session = store.get();
     }
 
     const verified = await fetch("/api/auth/verify", {

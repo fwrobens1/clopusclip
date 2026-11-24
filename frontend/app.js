@@ -16,22 +16,26 @@
   };
   const looksLikeUrl = (s) => /^https?:\/\/\S+$/i.test((s || "").trim());
 
-  // Attach the Supabase access token to every local API call.
+  // Attach the Supabase access token to every local API call. If the token
+  // expires while the tab is open, refresh it once and retry instead of
+  // throwing the user back to the auth page.
   const nativeFetch = window.fetch.bind(window);
-  window.fetch = function (input, init = {}) {
+  window.fetch = async function (input, init = {}) {
     const url = typeof input === "string" ? input : (input && input.url) || "";
-    let next = init;
-    if (url.startsWith("/api/") && window.ncAccess) {
+    const localApi = url.startsWith("/api/") && !url.startsWith("/api/auth/");
+    const call = () => {
+      if (!localApi || !window.ncAccess) return nativeFetch(input, init);
       const headers = new Headers(init.headers || {});
       headers.set("Authorization", `Bearer ${window.ncAccess}`);
-      next = Object.assign({}, init, { headers });
+      return nativeFetch(input, Object.assign({}, init, { headers }));
+    };
+    let response = await call();
+    if (response.status === 401 && localApi && window.ncRefreshSession) {
+      const refreshed = await window.ncRefreshSession();
+      if (refreshed) response = await call();
+      else location.replace("/auth");
     }
-    return nativeFetch(input, next).then((r) => {
-      if (r.status === 401 && url.startsWith("/api/") && !url.startsWith("/api/auth/")) {
-        location.replace("/auth");
-      }
-      return r;
-    });
+    return response;
   };
 
   const state = {
@@ -2022,26 +2026,57 @@
   }
 
   /* ---------------- init ---------------- */
-  Promise.resolve(window.ncAuthReady).then(function () {
-    setReadyRunCard();
-    resetStats();
-    renderRecent();
-    renderQueue();
-    renderStudio();
-    renderAll();
-    checkAsr();
-    loadLibrary();
-    loadLiveSessions();
-    loadPublications();
-
-    (function restoreJob() {
+  async function restoreJobs() {
+    try {
+      const r = await fetch("/api/jobs");
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Could not load jobs");
+      const jobs = d.jobs || [];
+      state.jobs = jobs.map((j) => ({
+        id: j.id,
+        label: j.title || j.channel || j.id,
+        status: j.status,
+        clips: (j.clips || []).length,
+        channel: j.channel,
+        created_at: j.created_at,
+        source_url: j.source_url,
+      }));
       const shared = new URLSearchParams(location.search).get("job");
       let id = shared || null;
       if (!id) {
         try { id = localStorage.getItem("nc_job") || localStorage.getItem("cf_job"); } catch (e) { /* ignore */ }
       }
-      if (!id) return;
-      attachJob(id, shared ? "Shared job" : "Previous job");
-    })();
+      if (!id && jobs.length) id = jobs[0].id;
+      if (id) {
+        const match = jobs.find((j) => j.id === id);
+        attachJob(id, shared ? "Shared job" : (match?.title || match?.channel || "Previous job"));
+        try { localStorage.setItem("nc_job", id); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      let id = new URLSearchParams(location.search).get("job");
+      try { id = id || localStorage.getItem("nc_job") || localStorage.getItem("cf_job"); } catch (err) { /* ignore */ }
+      if (id) attachJob(id, "Previous job");
+    }
+    renderRecent();
+    renderQueue();
+    renderStudio();
+    renderAll();
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (state.jobId) poll();
+    if ($("#page-live") && !$("#page-live").hidden) loadLiveSessions();
+    loadLibrary();
+  });
+
+  Promise.resolve(window.ncAuthReady).then(function () {
+    setReadyRunCard();
+    resetStats();
+    checkAsr();
+    loadLibrary();
+    loadLiveSessions();
+    loadPublications();
+    restoreJobs();
   });
 })();
